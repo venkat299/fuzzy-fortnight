@@ -1,0 +1,17 @@
+{
+  "llm_routes": {
+    "jd_competency": {
+      "name": "jd_competency",
+      "base_url": "http://localhost:8000",
+      "endpoint": "/v1/chat/completions",
+      "model": "gpt-4o-mini",
+      "timeout_s": 30.0,
+      "max_retries": 2,
+      "response_format": "json_object",
+      "api_key_env": "LLM_API_KEY"
+    }
+  },
+  "registry": {
+    "jd_analysis.generate_competency_matrix": "jd_competency"
+  }
+}

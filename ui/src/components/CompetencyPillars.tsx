@@ -2,75 +2,28 @@ import React from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Badge } from './ui/badge';
-import { Separator } from './ui/separator';
-import { ArrowLeft, Brain, Code, Users, Lightbulb, MessageSquare } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 
 interface CompetencyPillar {
-  id: string;
   name: string;
-  description: string;
-  icon: React.ReactNode;
+  summary: string;
   skills: string[];
 }
 
-interface InterviewData {
+interface CompetencyMatrix {
   jobTitle: string;
-  jobDescription: string;
   experienceYears: string;
+  competencyAreas: CompetencyPillar[];
 }
 
 interface CompetencyPillarsProps {
-  interviewData: InterviewData;
+  matrix: CompetencyMatrix;
   onBack: () => void;
   onStartInterview: () => void;
 }
 
-export function CompetencyPillars({ interviewData, onBack, onStartInterview }: CompetencyPillarsProps) {
-  // Generate competency pillars based on job description
-  const generateCompetencyPillars = (jobData: InterviewData): CompetencyPillar[] => {
-    // Always return exactly 5 competency pillars
-    const corePillars: CompetencyPillar[] = [
-      {
-        id: 'technical',
-        name: 'Technical Competency',
-        description: 'Core technical skills and knowledge required for the role',
-        icon: <Code className="h-5 w-5" />,
-        skills: ['Programming Languages', 'System Design', 'Problem Solving', 'Code Quality']
-      },
-      {
-        id: 'leadership',
-        name: 'Leadership & Collaboration',
-        description: 'Ability to lead teams and work effectively with others',
-        icon: <Users className="h-5 w-5" />,
-        skills: ['Team Leadership', 'Cross-functional Collaboration', 'Mentoring', 'Conflict Resolution']
-      },
-      {
-        id: 'innovation',
-        name: 'Innovation & Creativity',
-        description: 'Capacity for creative thinking and driving innovation',
-        icon: <Lightbulb className="h-5 w-5" />,
-        skills: ['Creative Problem Solving', 'Process Improvement', 'Innovation Mindset', 'Adaptability']
-      },
-      {
-        id: 'communication',
-        name: 'Communication & Influence',
-        description: 'Effective communication and stakeholder management',
-        icon: <MessageSquare className="h-5 w-5" />,
-        skills: ['Stakeholder Management', 'Presentation Skills', 'Written Communication', 'Influence']
-      },
-      {
-        id: 'learning',
-        name: 'Learning & Growth',
-        description: 'Continuous learning and professional development',
-        icon: <Brain className="h-5 w-5" />,
-        skills: ['Continuous Learning', 'Adaptability', 'Growth Mindset', 'Self-Reflection']
-      }
-    ];
-
-    return corePillars;
-  };
-
-  const competencyPillars = generateCompetencyPillars(interviewData);
+export function CompetencyPillars({ matrix, onBack, onStartInterview }: CompetencyPillarsProps) {
+  const competencyPillars = matrix.competencyAreas;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
@@ -84,7 +37,7 @@ export function CompetencyPillars({ interviewData, onBack, onStartInterview }: C
             </Button>
             <h1>Competency Pillars</h1>
             <p className="text-muted-foreground">
-              {interviewData.jobTitle} • {interviewData.experienceYears} years experience
+              {matrix.jobTitle} • {matrix.experienceYears} years experience
             </p>
           </div>
           <Button onClick={onStartInterview} size="lg">
@@ -97,14 +50,13 @@ export function CompetencyPillars({ interviewData, onBack, onStartInterview }: C
           <CardHeader>
             <CardTitle>Interview Summary</CardTitle>
             <CardDescription>
-              Based on the job requirements, we've identified 5 key competency areas to evaluate.
+              Based on the job requirements, we've identified {competencyPillars.length} key competency areas to evaluate.
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-2">
               {competencyPillars.map((pillar) => (
-                <Badge key={pillar.id} variant="secondary" className="flex items-center gap-1">
-                  {pillar.icon}
+                <Badge key={pillar.name} variant="secondary" className="flex items-center gap-1">
                   {pillar.name}
                 </Badge>
               ))}
@@ -115,13 +67,10 @@ export function CompetencyPillars({ interviewData, onBack, onStartInterview }: C
         {/* Competency Pillars Grid */}
         <div className="grid md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
           {competencyPillars.map((pillar) => (
-            <Card key={pillar.id} className="h-full">
+            <Card key={pillar.name} className="h-full">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  {pillar.icon}
-                  {pillar.name}
-                </CardTitle>
-                <CardDescription>{pillar.description}</CardDescription>
+                <CardTitle>{pillar.name}</CardTitle>
+                <CardDescription>{pillar.summary}</CardDescription>
               </CardHeader>
               <CardContent>
                 {/* Key Skills */}

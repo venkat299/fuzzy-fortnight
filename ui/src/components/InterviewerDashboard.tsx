@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
@@ -14,19 +14,28 @@ interface InterviewData {
 }
 
 interface InterviewerDashboardProps {
-  onSubmitInterview: (data: InterviewData) => void;
+  onSubmitInterview: (data: InterviewData) => Promise<void>;
+  initialData?: InterviewData;
+  isLoading: boolean;
+  errorMessage: string | null;
 }
 
-export function InterviewerDashboard({ onSubmitInterview }: InterviewerDashboardProps) {
-  const [formData, setFormData] = useState<InterviewData>({
+export function InterviewerDashboard({ onSubmitInterview, initialData, isLoading, errorMessage }: InterviewerDashboardProps) {
+  const [formData, setFormData] = useState<InterviewData>(initialData ?? {
     jobTitle: '',
     jobDescription: '',
     experienceYears: ''
   });
 
-  const handleSubmit = (e: React.FormEvent) => {
+  useEffect(() => {
+    if (initialData) {
+      setFormData(initialData);
+    }
+  }, [initialData]);
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSubmitInterview(formData);
+    await onSubmitInterview(formData);
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -132,10 +141,15 @@ export function InterviewerDashboard({ onSubmitInterview }: InterviewerDashboard
               </div>
 
               {/* Submit Button */}
-              <Button type="submit" className="w-full" size="lg">
-                Identify Competencies
+              <Button type="submit" className="w-full" size="lg" disabled={isLoading}>
+                {isLoading ? 'Analyzing…' : 'Identify Competencies'}
               </Button>
             </form>
+            {errorMessage && (
+              <p className="mt-4 text-sm text-red-600" role="alert">
+                {errorMessage}
+              </p>
+            )}
           </CardContent>
         </Card>
 
