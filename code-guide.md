@@ -1,10 +1,24 @@
-- Write concise code. Prefer small, local helpers. Deep methods must be terse.
+Updated Codex prompt:
+
+- Write concise code. Prefer small local helpers. Deep methods must be terse.
 - Only end-of-line comments. Comment only non-obvious logic. No block comments or docstrings.
-- Put a one-line description for each file and each method as a comment:
-- Keep modules loosely coupled. No cross-module internals. Interact only via clear interfaces.
-- Provide a single common config file used by all modules. No hardcoded endpoints or keys.
+- Each file and method gets a one-line description
+- Loose coupling across modules. Interact only via clear interfaces. No cross-module internals.
+- Single common config file for all modules. No hardcoded endpoints or keys.
 - Add an `llm_gateway` module. Other modules call LLMs only through this gateway.
-- Allow per-module and per-function LLM settings in the common config: base URL, model, and endpoint.
-- Inject config into modules. No global mutable state. No side effects at import.
-- Separate I/O from logic. Pure functions where possible. Return data, do not print.
-- Enforce strict boundaries: modules are moveable to microservices without changes.
+- Per-module and per-function LLM settings live in the common config: base URL, model, endpoint, timeouts, retries. Inject config. No global mutable state.
+- Separate I/O from logic. Prefer pure functions. Return data, do not print.
+- Design modules to be moveable to microservices without code changes.
+
+Pydantic and JSON enforcement:
+
+- Use Pydantic wherever useful: config schema, request/response DTOs, domain entities, and LLM output schemas. Validate on load. Fail fast on errors.
+- `llm_gateway` API:
+
+  - `call(task: str, schema: Type[BaseModel], *, cfg: LlmRoute) -> BaseModel`
+  - Always enforce JSON output. Send a system hint: “Reply with a single JSON object matching this schema.”
+  - When available, set API response_format to JSON. Otherwise parse with `model_validate_json`.
+  - On invalid JSON or schema mismatch: retry with a short repair prompt. Cap retries. Log reason, not content.
+
+- All public functions that consume LLM output must accept and return Pydantic models only. No dicts at boundaries.
+- Expose a small registry that maps module/function to its `LlmRoute` and output schema, loaded from the common config.

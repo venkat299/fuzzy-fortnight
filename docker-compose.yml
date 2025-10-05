@@ -7,6 +7,8 @@ services:
       dockerfile: Dockerfile.api
     environment:
       - LLM_API_KEY=${LLM_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "5001:8000"
   ui:

@@ -2,9 +2,9 @@
   "llm_routes": {
     "jd_competency": {
       "name": "jd_competency",
-      "base_url": "http://localhost:8000",
+      "base_url": "http://localhost:1234",
       "endpoint": "/v1/chat/completions",
-      "model": "gpt-4o-mini",
+      "model": "openai/gpt-oss-20b",
       "timeout_s": 30.0,
       "max_retries": 2,
       "response_format": "json_object",

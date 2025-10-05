@@ -3,8 +3,8 @@
 Python modules:
 
 - `config.py` loads `app_config.json` and resolves LLM routes.
-- `llm_gateway.py` provides a validated interface to call configured LLM endpoints.
-- `jd_analysis.py` turns job descriptions into competency matrices for the UI.
+- `llm_gateway/` package provides a validated interface to call configured LLM endpoints.
+- `jd_analysis/` package turns job descriptions into competency matrices for the UI.
 - `api_server.py` exposes the job-description analysis as a FastAPI service for the UI.
 
 Configuration lives in `app_config.json`. Set the `LLM_API_KEY` environment variable to authorize requests to the configured model endpoint.

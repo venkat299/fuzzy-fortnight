@@ -13,7 +13,9 @@ RUN apt-get update \
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY api_server.py config.py jd_analysis.py llm_gateway.py app_config.json ./
+COPY api_server.py config.py app_config.json ./
+COPY jd_analysis ./jd_analysis
+COPY llm_gateway ./llm_gateway
 
 EXPOSE 8000
 
