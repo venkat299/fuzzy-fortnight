@@ -36,15 +36,10 @@ T = TypeVar("T", bound=BaseModel)
 
 def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClient] = None) -> T:  # Invoke configured LLM route and validate output
     schema_json = json.dumps(schema.model_json_schema(), indent=2)
+    system_prompt = "Reply with a single JSON object matching this schema:\n" + schema_json
     base_messages = [
-        {
-            "role": "system",
-            "content": [
-                {"type": "text", "text": "Reply with a single JSON object matching this schema."},
-                {"type": "text", "text": schema_json},
-            ],
-        },
-        {"role": "user", "content": [{"type": "text", "text": task}]},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task},
     ]
     attempts = cfg.max_retries + 1
     last_error: Optional[Exception] = None
@@ -54,12 +49,7 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
             messages.append(
                 {
                     "role": "system",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "The previous reply failed validation. Return valid JSON only.",
-                        }
-                    ],
+                    "content": "The previous reply failed validation. Return valid JSON only.",
                 }
             )
         payload: Dict[str, Any] = {"model": cfg.model, "messages": messages}
