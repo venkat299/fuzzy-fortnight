@@ -1,0 +1,10 @@
+- Write concise code. Prefer small, local helpers. Deep methods must be terse.
+- Only end-of-line comments. Comment only non-obvious logic. No block comments or docstrings.
+- Put a one-line description for each file and each method as a comment:
+- Keep modules loosely coupled. No cross-module internals. Interact only via clear interfaces.
+- Provide a single common config file used by all modules. No hardcoded endpoints or keys.
+- Add an `llm_gateway` module. Other modules call LLMs only through this gateway.
+- Allow per-module and per-function LLM settings in the common config: base URL, model, and endpoint.
+- Inject config into modules. No global mutable state. No side effects at import.
+- Separate I/O from logic. Pure functions where possible. Return data, do not print.
+- Enforce strict boundaries: modules are moveable to microservices without changes.
