@@ -10,7 +10,6 @@ interface InterviewData {
 
 interface CompetencyArea {
   name: string;
-  summary: string;
   skills: string[];
 }
 
@@ -41,16 +40,15 @@ export default function App() {
     const rawAreas = Array.isArray(data.competency_areas) ? data.competency_areas : [];
     const competencyAreas: CompetencyArea[] = rawAreas.map((item) => {
       if (!item || typeof item !== 'object') {
-        return { name: '', summary: '', skills: [] };
+        return { name: '', skills: [] };
       }
       const entry = item as Record<string, unknown>;
       const skillsSource = Array.isArray(entry.skills) ? entry.skills : [];
       return {
         name: String(entry.name ?? ''),
-        summary: String(entry.summary ?? ''),
         skills: skillsSource.map((skill) => String(skill ?? '')).filter((skill) => skill.trim().length > 0)
       };
-    }).filter((area) => area.name.trim().length > 0 || area.summary.trim().length > 0 || area.skills.length > 0);
+    }).filter((area) => area.name.trim().length > 0 || area.skills.length > 0);
     return {
       jobTitle: String(data.job_title ?? fallback.jobTitle),
       experienceYears: String(data.experience_years ?? fallback.experienceYears),

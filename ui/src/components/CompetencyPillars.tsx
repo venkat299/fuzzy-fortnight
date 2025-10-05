@@ -6,7 +6,6 @@ import { ArrowLeft } from 'lucide-react';
 
 interface CompetencyPillar {
   name: string;
-  summary: string;
   skills: string[];
 }
 
@@ -70,7 +69,6 @@ export function CompetencyPillars({ matrix, onBack, onStartInterview }: Competen
             <Card key={pillar.name} className="h-full">
               <CardHeader>
                 <CardTitle>{pillar.name}</CardTitle>
-                <CardDescription>{pillar.summary}</CardDescription>
               </CardHeader>
               <CardContent>
                 {/* Key Skills */}

@@ -18,7 +18,6 @@ class JobProfile(BaseModel):  # Input profile from UI
 
 class CompetencyArea(BaseModel):  # Competency area with skills
     name: str
-    summary: str
     skills: List[str] = Field(min_length=1)
 
 
@@ -55,7 +54,6 @@ def _build_task(profile: JobProfile) -> str:  # Build task prompt for LLM
         - competency_areas: array with at least five items.
             Each item must contain:
               - name: concise competency area name.
-              - summary: two-sentence overview of why this competency matters.
               - skills: list of three to six concrete skills, written as short phrases.
         Return only JSON without markdown fences, text, or commentary.
         """
