@@ -13,16 +13,25 @@ interface CompetencyMatrix {
   jobTitle: string;
   experienceYears: string;
   competencyAreas: CompetencyPillar[];
+  interviewId: string;
 }
 
 interface CompetencyPillarsProps {
   matrix: CompetencyMatrix;
   onBack: () => void;
-  onStartInterview: () => void;
+  onStartInterview: (interviewId: string) => void;
+  isProceeding: boolean;
+  errorMessage: string | null;
 }
 
-export function CompetencyPillars({ matrix, onBack, onStartInterview }: CompetencyPillarsProps) {
+export function CompetencyPillars({ matrix, onBack, onStartInterview, isProceeding, errorMessage }: CompetencyPillarsProps) {
   const competencyPillars = matrix.competencyAreas;
+  const handleProceed = () => {
+    if (!matrix.interviewId) {
+      return;
+    }
+    onStartInterview(matrix.interviewId);
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
@@ -39,8 +48,8 @@ export function CompetencyPillars({ matrix, onBack, onStartInterview }: Competen
               {matrix.jobTitle} • {matrix.experienceYears} years experience
             </p>
           </div>
-          <Button onClick={onStartInterview} size="lg">
-            Start Interview
+          <Button onClick={handleProceed} size="lg" disabled={isProceeding || !matrix.interviewId}>
+            {isProceeding ? 'Loading Rubric…' : 'Start Interview'}
           </Button>
         </div>
 
@@ -60,6 +69,11 @@ export function CompetencyPillars({ matrix, onBack, onStartInterview }: Competen
                 </Badge>
               ))}
             </div>
+            {errorMessage && (
+              <p className="mt-4 text-sm text-red-600" role="alert">
+                {errorMessage}
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -92,8 +106,8 @@ export function CompetencyPillars({ matrix, onBack, onStartInterview }: Competen
           <Button variant="outline" onClick={onBack}>
             Modify Interview Setup
           </Button>
-          <Button onClick={onStartInterview} size="lg">
-            Proceed to Interview
+          <Button onClick={handleProceed} size="lg" disabled={isProceeding || !matrix.interviewId}>
+            {isProceeding ? 'Loading Rubric…' : 'Proceed to Interview'}
           </Button>
         </div>
       </div>

@@ -80,6 +80,7 @@ pnpm-debug.log*
 
 # Logs / runtime
 logs/
+data/
 *.log
 *.pid
 *.pid.lock

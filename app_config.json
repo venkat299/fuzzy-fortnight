@@ -11,6 +11,7 @@
     }
   },
   "registry": {
-    "jd_analysis.generate_competency_matrix": "jd_competency"
+    "jd_analysis.generate_competency_matrix": "jd_competency",
+    "rubric_design.generate_rubric": "jd_competency"
   }
 }

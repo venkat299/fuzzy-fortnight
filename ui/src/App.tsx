@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { InterviewerDashboard } from './components/InterviewerDashboard';
 import { CompetencyPillars } from './components/CompetencyPillars';
+import { InterviewRubric } from './components/InterviewRubric';
 
 interface InterviewData {
   jobTitle: string;
@@ -17,9 +18,39 @@ interface CompetencyMatrix {
   jobTitle: string;
   experienceYears: string;
   competencyAreas: CompetencyArea[];
+  interviewId: string;
 }
 
-type AppState = 'interviewer-dashboard' | 'competency-pillars';
+interface RubricAnchor {
+  level: number;
+  text: string;
+}
+
+interface RubricCriterion {
+  name: string;
+  weight: number;
+  anchors: RubricAnchor[];
+}
+
+interface Rubric {
+  competency: string;
+  band: string;
+  bandNotes: string[];
+  criteria: RubricCriterion[];
+  redFlags: string[];
+  evidence: string[];
+  minPassScore: number;
+}
+
+interface InterviewRubricData {
+  interviewId: string;
+  jobTitle: string;
+  experienceYears: string;
+  status: string;
+  rubrics: Rubric[];
+}
+
+type AppState = 'interviewer-dashboard' | 'competency-pillars' | 'interview-rubric';
 
 export default function App() {
   const [currentState, setCurrentState] = useState<AppState>('interviewer-dashboard');
@@ -27,32 +58,111 @@ export default function App() {
   const [matrix, setMatrix] = useState<CompetencyMatrix | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [rubricData, setRubricData] = useState<InterviewRubricData | null>(null);
+  const [isProceeding, setIsProceeding] = useState(false);
 
   const normalizeMatrix = (payload: unknown, fallback: InterviewData): CompetencyMatrix => {
     if (!payload || typeof payload !== 'object') {
       return {
         jobTitle: fallback.jobTitle,
         experienceYears: fallback.experienceYears,
-        competencyAreas: []
+        competencyAreas: [],
+        interviewId: ''
       };
     }
     const data = payload as Record<string, unknown>;
     const rawAreas = Array.isArray(data.competency_areas) ? data.competency_areas : [];
-    const competencyAreas: CompetencyArea[] = rawAreas.map((item) => {
-      if (!item || typeof item !== 'object') {
-        return { name: '', skills: [] };
-      }
-      const entry = item as Record<string, unknown>;
-      const skillsSource = Array.isArray(entry.skills) ? entry.skills : [];
-      return {
-        name: String(entry.name ?? ''),
-        skills: skillsSource.map((skill) => String(skill ?? '')).filter((skill) => skill.trim().length > 0)
-      };
-    }).filter((area) => area.name.trim().length > 0 || area.skills.length > 0);
+    const competencyAreas: CompetencyArea[] = rawAreas
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return { name: '', skills: [] };
+        }
+        const entry = item as Record<string, unknown>;
+        const skillsSource = Array.isArray(entry.skills) ? entry.skills : [];
+        return {
+          name: String(entry.name ?? ''),
+          skills: skillsSource.map((skill) => String(skill ?? '')).filter((skill) => skill.trim().length > 0)
+        };
+      })
+      .filter((area) => area.name.trim().length > 0 || area.skills.length > 0);
     return {
       jobTitle: String(data.job_title ?? fallback.jobTitle),
       experienceYears: String(data.experience_years ?? fallback.experienceYears),
-      competencyAreas
+      competencyAreas,
+      interviewId: String(data.interview_id ?? '').trim()
+    };
+  };
+
+  const normalizeRubric = (payload: unknown): InterviewRubricData | null => {
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const source = payload as Record<string, unknown>;
+    const rubricsSource = Array.isArray(source.rubrics) ? source.rubrics : [];
+    const rubrics: Rubric[] = rubricsSource
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const row = entry as Record<string, unknown>;
+        const criteria = Array.isArray(row.criteria)
+          ? row.criteria
+              .map((criterion) => {
+                if (!criterion || typeof criterion !== 'object') {
+                  return null;
+                }
+                const criterionRow = criterion as Record<string, unknown>;
+                const anchors = Array.isArray(criterionRow.anchors)
+                  ? criterionRow.anchors
+                      .map((anchor) => {
+                        if (!anchor || typeof anchor !== 'object') {
+                          return null;
+                        }
+                        const anchorRow = anchor as Record<string, unknown>;
+                        return {
+                          level: Number(anchorRow.level ?? 0),
+                          text: String(anchorRow.text ?? '')
+                        };
+                      })
+                      .filter((anchor): anchor is RubricAnchor => Boolean(anchor && anchor.text.trim().length > 0))
+                  : [];
+                return {
+                  name: String(criterionRow.name ?? ''),
+                  weight: Number(criterionRow.weight ?? 0),
+                  anchors
+                };
+              })
+              .filter((criterion): criterion is RubricCriterion => Boolean(criterion && criterion.name.trim().length > 0))
+          : [];
+        return {
+          competency: String(row.competency ?? ''),
+          band: String(row.band ?? ''),
+          bandNotes: Array.isArray(row.band_notes)
+            ? row.band_notes.map((note) => String(note ?? '')).filter((note) => note.trim().length > 0)
+            : [],
+          criteria,
+          redFlags: Array.isArray(row.red_flags)
+            ? row.red_flags.map((item) => String(item ?? '')).filter((item) => item.trim().length > 0)
+            : [],
+          evidence: Array.isArray(row.evidence)
+            ? row.evidence.map((item) => String(item ?? '')).filter((item) => item.trim().length > 0)
+            : [],
+          minPassScore: Number(row.min_pass_score ?? 0)
+        };
+      })
+      .filter((rubric): rubric is Rubric => Boolean(rubric && rubric.competency.trim().length > 0));
+
+    const interviewId = String(source.interview_id ?? '').trim();
+    if (!interviewId) {
+      return null;
+    }
+
+    return {
+      interviewId,
+      jobTitle: String(source.job_title ?? ''),
+      experienceYears: String(source.experience_years ?? ''),
+      status: String(source.status ?? ''),
+      rubrics
     };
   };
 
@@ -60,6 +170,7 @@ export default function App() {
     setErrorMessage(null);
     setIsLoading(true);
     setInterviewData(data);
+    setRubricData(null);
     try {
       const response = await fetch('/api/competency-matrix', {
         method: 'POST',
@@ -74,7 +185,10 @@ export default function App() {
       });
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null);
-        const detail = errorPayload && typeof errorPayload.detail === 'string' ? errorPayload.detail : 'Failed to analyze job description.';
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to analyze job description.';
         throw new Error(detail);
       }
       const payload = await response.json();
@@ -93,8 +207,32 @@ export default function App() {
     setCurrentState('interviewer-dashboard');
   };
 
-  const handleStartInterview = () => {
-    alert('Interview functionality would be implemented here. This would start the actual AI-powered interview process.');
+  const handleStartInterview = async (interviewId: string) => {
+    setErrorMessage(null);
+    setIsProceeding(true);
+    try {
+      const response = await fetch(`/api/interviews/${interviewId}/rubric`);
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to load interview rubric.';
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      const normalized = normalizeRubric(payload);
+      if (!normalized) {
+        throw new Error('Received an invalid rubric response.');
+      }
+      setRubricData(normalized);
+      setCurrentState('interview-rubric');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load interview rubric.';
+      setErrorMessage(message);
+    } finally {
+      setIsProceeding(false);
+    }
   };
 
   const dashboardInitialData = useMemo(() => interviewData ?? undefined, [interviewData]);
@@ -120,6 +258,23 @@ export default function App() {
           matrix={matrix}
           onBack={handleBackToDashboard}
           onStartInterview={handleStartInterview}
+          isProceeding={isProceeding}
+          errorMessage={errorMessage}
+        />
+      );
+
+    case 'interview-rubric':
+      if (!rubricData) {
+        setCurrentState('interviewer-dashboard');
+        return null;
+      }
+      return (
+        <InterviewRubric
+          data={rubricData}
+          onBack={() => {
+            setErrorMessage(null);
+            setCurrentState('competency-pillars');
+          }}
         />
       );
 
