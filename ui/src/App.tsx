@@ -3,7 +3,7 @@ import { InterviewerDashboard } from './components/InterviewerDashboard';
 import { CompetencyPillars } from './components/CompetencyPillars';
 import { InterviewRubric } from './components/InterviewRubric';
 import { InterviewerOverview } from './components/InterviewerOverview';
-import { CandidateFormData, CandidateIntakeForm } from './components/CandidateIntakeForm';
+import { AddCandidateFormData, AddCandidatePage } from './components/AddCandidatePage';
 
 interface InterviewData {
   jobTitle: string;
@@ -76,6 +76,8 @@ type AppState =
   | 'candidate-intake'
   | 'competency-pillars'
   | 'interview-rubric';
+
+const DEFAULT_CANDIDATE_STATUS = 'Applied';
 
 export default function App() {
   const [currentState, setCurrentState] = useState<AppState>('interviewer-overview');
@@ -372,10 +374,11 @@ export default function App() {
     }
   };
 
-  const handleCreateCandidate = async (data: CandidateFormData) => {
+  const handleCreateCandidate = async (data: AddCandidateFormData) => {
     setCandidateFormError(null);
     setIsCandidateSubmitting(true);
     try {
+      const primaryInterviewId = data.interviewIds[0] ?? null;
       const response = await fetch('/api/candidates', {
         method: 'POST',
         headers: {
@@ -384,8 +387,8 @@ export default function App() {
         body: JSON.stringify({
           full_name: data.fullName,
           resume: data.resume,
-          interview_id: data.interviewId,
-          status: data.status
+          interview_id: primaryInterviewId,
+          status: DEFAULT_CANDIDATE_STATUS
         })
       });
       if (!response.ok) {
@@ -445,14 +448,18 @@ export default function App() {
 
     case 'candidate-intake':
       return (
-        <CandidateIntakeForm
-          interviews={interviews.map((item) => ({ interviewId: item.interviewId, jobTitle: item.jobTitle }))}
-          onSubmit={handleCreateCandidate}
-          onCancel={() => {
+        <AddCandidatePage
+          interviews={interviews.map((item) => ({
+            interviewId: item.interviewId,
+            jobTitle: item.jobTitle,
+            jobDescription: item.jobDescription
+          }))}
+          onSave={handleCreateCandidate}
+          onBackToDashboard={() => {
             setCandidateFormError(null);
             setCurrentState('interviewer-overview');
           }}
-          isSubmitting={isCandidateSubmitting}
+          isSaving={isCandidateSubmitting}
           errorMessage={candidateFormError}
         />
       );
@@ -483,6 +490,10 @@ export default function App() {
           onBack={() => {
             setErrorMessage(null);
             setCurrentState('competency-pillars');
+          }}
+          onBackToDashboard={() => {
+            setErrorMessage(null);
+            setCurrentState('interviewer-overview');
           }}
         />
       );

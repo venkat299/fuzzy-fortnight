@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, LayoutDashboard } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -37,27 +37,42 @@ interface InterviewRubricData {
 interface InterviewRubricProps {
   data: InterviewRubricData;
   onBack: () => void;
+  onBackToDashboard: () => void;
 }
 
-export function InterviewRubric({ data, onBack }: InterviewRubricProps) {
+export function InterviewRubric({ data, onBack, onBackToDashboard }: InterviewRubricProps) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
       <div className="max-w-6xl mx-auto space-y-8">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <Button variant="ghost" onClick={onBack} className="mb-4 flex items-center gap-2">
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="ghost" onClick={onBack} className="flex items-center gap-2">
               <ArrowLeft className="h-4 w-4" />
-              Back to Competencies
+              Back to competencies
             </Button>
-            <h1>Interview Rubric</h1>
-            <p className="text-muted-foreground">
-              {data.jobTitle} • {data.experienceYears} years experience
-            </p>
+            <Button
+              type="button"
+              variant="outline"
+              className="flex items-center gap-2"
+              onClick={onBackToDashboard}
+            >
+              <LayoutDashboard className="h-4 w-4" />
+              Back to dashboard
+            </Button>
           </div>
-          <Badge variant="secondary" className="flex items-center gap-2 h-9 text-sm">
-            <CheckCircle2 className="h-4 w-4 text-green-600" />
-            {data.status || 'ready'}
-          </Badge>
+
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h1>Interview Rubric</h1>
+              <p className="text-muted-foreground">
+                {data.jobTitle} • {data.experienceYears} years experience
+              </p>
+            </div>
+            <Badge variant="secondary" className="flex items-center gap-2 h-9 text-sm">
+              <CheckCircle2 className="h-4 w-4 text-green-600" />
+              {data.status || 'ready'}
+            </Badge>
+          </div>
         </div>
 
         <Card>
