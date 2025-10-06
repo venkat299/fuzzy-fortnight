@@ -157,8 +157,8 @@ def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricSt
         task = _build_task(area, band)
         rubric = call(task, Rubric, cfg=route)
         rubrics.append(rubric)
-        if index < len(areas) - 1:
-            time.sleep(3)
+        # if index < len(areas) - 1:
+        #     time.sleep(3)
     interview_id = uuid4().hex
     store.save(interview_id, matrix.job_title, matrix.experience_years, rubrics)
     return interview_id

@@ -16,6 +16,7 @@ class LlmRoute(BaseModel):  # LLM endpoint configuration
     api_key_env: str | None = None
     response_format: str | None = None
     extra_headers: Dict[str, str] = Field(default_factory=dict)
+    sequential: bool = False
 
 
 class AppConfig(BaseModel):  # Application configuration root
