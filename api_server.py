@@ -1,5 +1,6 @@
 from __future__ import annotations  # FastAPI server exposing competency analysis
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -8,6 +9,9 @@ from pydantic import BaseModel
 
 from jd_analysis import CompetencyMatrix, JobProfile, analyze_with_config
 from llm_gateway import LlmGatewayError
+
+
+logger = logging.getLogger(__name__)
 from rubric_design import InterviewRubricSnapshot, design_with_config as design_rubrics_with_config, load_rubrics
 
 CONFIG_PATH = Path(__file__).resolve().parent / "app_config.json"
@@ -43,6 +47,7 @@ def create_competency_matrix(payload: AnalyzeRequest) -> CompetencyMatrixRespons
     try:
         matrix = analyze_with_config(profile, config_path=CONFIG_PATH)
         interview_id = design_rubrics_with_config(matrix, config_path=CONFIG_PATH, db_path=DATA_PATH)
+        print(interview_id)
         return CompetencyMatrixResponse(
             job_title=matrix.job_title,
             experience_years=matrix.experience_years,
@@ -50,9 +55,11 @@ def create_competency_matrix(payload: AnalyzeRequest) -> CompetencyMatrixRespons
             interview_id=interview_id,
         )
     except LlmGatewayError as exc:
-        raise HTTPException(status_code=502, detail="LLM request failed") from exc
+        logger.exception("LLM request failed")
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Unable to analyze job description") from exc
+        logger.exception("Unexpected error during competency analysis")
+        raise HTTPException(status_code=500, detail=f"Unable to analyze job description: {exc}") from exc
 
 
 @app.get("/api/interviews/{interview_id}/rubric", response_model=InterviewRubricSnapshot)

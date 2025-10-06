@@ -144,7 +144,14 @@ class RubricStore:  # SQLite-backed rubric storage
 def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricStore) -> str:  # Generate rubrics and persist
     band = _infer_band(matrix.experience_years)
     rubrics: List[Rubric] = []
-    for area in matrix.competency_areas:
+    for raw_area in matrix.competency_areas:
+        if isinstance(raw_area, CompetencyArea):
+            area = raw_area
+        elif isinstance(raw_area, dict):
+            area = CompetencyArea.model_validate(raw_area)
+        else:
+            name, skills = _coerce_area_tuple(raw_area)
+            area = CompetencyArea(name=name, skills=skills)
         task = _build_task(area, band)
         rubric = call(task, Rubric, cfg=route)
         rubrics.append(rubric)
@@ -214,6 +221,13 @@ def _build_task(area: CompetencyArea, band: BandLiteral) -> str:  # Build rubric
           "min_pass_score": number
         }
 
+        Strict requirements:
+        - Return a single JSON object only (no markdown fences, no prose).
+        - Populate every field exactly as shown above; never omit required keys.
+        - Provide 3-5 criteria per competency. Weights must sum to 1.0, use decimals.
+        - Supply 3-5 "evidence" probes and at least one "red_flags" item (use [] only if none exist).
+        - Use plain ASCII quotes and characters.
+
         Guidance for anchors: tailor to band scope; emphasize definitions, when-to-use, trade-offs, failure modes, and concrete examples from experience.
         """
     ).strip()
@@ -239,3 +253,15 @@ def _infer_band(experience_years: str) -> BandLiteral:  # Map experience text to
     if value <= 10:
         return "7-10"
     return "10+"
+
+
+def _coerce_area_tuple(raw_area: object) -> tuple[str, List[str]]:  # Normalize tuple/list competency data
+    if isinstance(raw_area, (list, tuple)) and len(raw_area) == 2:
+        name = str(raw_area[0])
+        skills_raw = raw_area[1]
+        if isinstance(skills_raw, (list, tuple)):
+            skills = [str(skill) for skill in skills_raw]
+        else:
+            skills = [str(skills_raw)] if skills_raw is not None else []
+        return name, skills
+    raise TypeError(f"Unsupported competency area format: {raw_area!r}")

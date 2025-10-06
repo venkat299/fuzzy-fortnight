@@ -43,13 +43,14 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
     ]
     attempts = cfg.max_retries + 1
     last_error: Optional[Exception] = None
+    last_error_text: Optional[str] = None
     for attempt in range(attempts):
         messages = list(base_messages)
         if attempt > 0:
             messages.append(
                 {
                     "role": "system",
-                    "content": "The previous reply failed validation. Return valid JSON only.",
+                    "content": _retry_hint(last_error_text),
                 }
             )
         payload: Dict[str, Any] = {"model": cfg.model, "messages": messages}
@@ -82,6 +83,7 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
         except (json.JSONDecodeError, ValidationError) as exc:
             logger.warning("LLM output validation failed: %s", exc)
             last_error = exc
+            last_error_text = str(exc)
             _close_safely(close_cb)
             continue
     raise LlmGatewayError("LLM output validation failed") from last_error
@@ -122,4 +124,33 @@ def _extract_content(data: Any) -> str:  # Extract message content from LLM resp
 
 
 def _validate(schema: Type[T], content: str) -> T:  # Parse JSON content with schema
-    return schema.model_validate_json(content)
+    cleaned = _strip_code_fences(content)
+    return schema.model_validate_json(cleaned)
+
+
+def _strip_code_fences(content: str) -> str:  # Remove common markdown fences from LLM output
+    text = content.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+            while lines and lines[0].strip() == "":
+                lines = lines[1:]
+            while lines and lines[-1].strip() == "":
+                lines = lines[:-1]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+    return text
+
+
+def _retry_hint(error_text: Optional[str]) -> str:  # Compose retry instructions including last error
+    if not error_text:
+        return "The previous reply failed validation. Return valid JSON only."
+    truncated = error_text.splitlines()[0].strip()
+    if len(truncated) > 200:
+        truncated = truncated[:197] + "..."
+    return (
+        "The previous reply failed validation. Reason: "
+        f"{truncated}. Return valid JSON only."
+    )

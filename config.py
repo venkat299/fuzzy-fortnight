@@ -30,12 +30,12 @@ def load_config(path: Path) -> AppConfig:  # Load configuration from disk
 
 def resolve_registry(cfg: AppConfig, schemas: Dict[str, Type[BaseModel]]) -> Dict[str, Tuple[LlmRoute, Type[BaseModel]]]:  # Build registry with schemas
     resolved: Dict[str, Tuple[LlmRoute, Type[BaseModel]]] = {}
-    for target, route_id in cfg.registry.items():
+    for target, schema in schemas.items():
+        if target not in cfg.registry:
+            raise KeyError(f"Registry entry missing for '{target}'")
+        route_id = cfg.registry[target]
         if route_id not in cfg.llm_routes:
             raise KeyError(f"Route '{route_id}' missing for '{target}'")
-        if target not in schemas:
-            raise KeyError(f"Schema missing for '{target}'")
-        schema = schemas[target]
         if not issubclass(schema, BaseModel):
             raise TypeError(f"Schema for '{target}' must be BaseModel")
         resolved[target] = (cfg.llm_routes[route_id], schema)
