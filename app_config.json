@@ -1,17 +1,26 @@
 {
   "llm_routes": {
-    "jd_competency": {
-      "name": "jd_competency",
+    "gpt-oss-20b-local": {
+      "name": "gpt-oss-20b-local",
       "base_url": "http://192.168.0.132:1234",
       "endpoint": "/v1/chat/completions",
       "model": "openai/gpt-oss-20b",
       "timeout_s": 30.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY"
+    },
+    "qwen3-4b-local": {
+      "name": "qwen3-4b-local",
+      "base_url": "http://192.168.0.132:1234",
+      "endpoint": "/v1/chat/completions",
+      "model": "qwen/qwen3-4b-2507",
+      "timeout_s": 30.0,
+      "max_retries": 2,
+      "api_key_env": "LLM_API_KEY"
     }
   },
   "registry": {
-    "jd_analysis.generate_competency_matrix": "jd_competency",
-    "rubric_design.generate_rubric": "jd_competency"
+    "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
+    "rubric_design.generate_rubric": "qwen3-4b-local"
   }
 }

@@ -6,6 +6,7 @@ from textwrap import dedent
 from typing import Iterable, List, Literal
 from uuid import uuid4
 import sqlite3
+import time
 
 from pydantic import BaseModel, Field
 
@@ -144,7 +145,8 @@ class RubricStore:  # SQLite-backed rubric storage
 def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricStore) -> str:  # Generate rubrics and persist
     band = _infer_band(matrix.experience_years)
     rubrics: List[Rubric] = []
-    for raw_area in matrix.competency_areas:
+    areas = list(matrix.competency_areas)
+    for index, raw_area in enumerate(areas):
         if isinstance(raw_area, CompetencyArea):
             area = raw_area
         elif isinstance(raw_area, dict):
@@ -155,6 +157,8 @@ def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricSt
         task = _build_task(area, band)
         rubric = call(task, Rubric, cfg=route)
         rubrics.append(rubric)
+        if index < len(areas) - 1:
+            time.sleep(3)
     interview_id = uuid4().hex
     store.save(interview_id, matrix.job_title, matrix.experience_years, rubrics)
     return interview_id
@@ -224,7 +228,8 @@ def _build_task(area: CompetencyArea, band: BandLiteral) -> str:  # Build rubric
         Strict requirements:
         - Return a single JSON object only (no markdown fences, no prose).
         - Populate every field exactly as shown above; never omit required keys.
-        - Provide 3-5 criteria per competency. Weights must sum to 1.0, use decimals.
+        - Provide 3 criteria per competency. Weights must sum to 1.0, use decimals.
+        - For every criterion, return exactly five anchors covering levels 1 through 5. Do not omit any level.
         - Supply 3-5 "evidence" probes and at least one "red_flags" item (use [] only if none exist).
         - Use plain ASCII quotes and characters.
 
