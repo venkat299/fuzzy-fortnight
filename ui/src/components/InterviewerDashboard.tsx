@@ -5,7 +5,7 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
-import { Briefcase, Upload } from 'lucide-react';
+import { ArrowLeft, Briefcase, Upload } from 'lucide-react';
 
 const DEFAULT_JOB_DESCRIPTION = `Responsibilities:
 - Develop and enhance forecasting models using time series forecasting, statistical modeling, and machine learning techniques
@@ -37,9 +37,10 @@ interface InterviewerDashboardProps {
   initialData?: InterviewData;
   isLoading: boolean;
   errorMessage: string | null;
+  onBack?: () => void;
 }
 
-export function InterviewerDashboard({ onSubmitInterview, initialData, isLoading, errorMessage }: InterviewerDashboardProps) {
+export function InterviewerDashboard({ onSubmitInterview, initialData, isLoading, errorMessage, onBack }: InterviewerDashboardProps) {
   const [formData, setFormData] = useState<InterviewData>(initialData ?? {
     jobTitle: '',
     jobDescription: DEFAULT_JOB_DESCRIPTION,
@@ -74,6 +75,18 @@ export function InterviewerDashboard({ onSubmitInterview, initialData, isLoading
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="mb-8">
+          {onBack && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="mb-4 inline-flex items-center gap-2"
+              onClick={onBack}
+            >
+              <ArrowLeft className="h-4 w-4" />
+              Back to dashboard
+            </Button>
+          )}
           <h1 className="flex items-center gap-2">
             <Briefcase className="h-8 w-8" />
             Interview Preparation

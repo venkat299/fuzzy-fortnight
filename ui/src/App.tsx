@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { InterviewerDashboard } from './components/InterviewerDashboard';
 import { CompetencyPillars } from './components/CompetencyPillars';
 import { InterviewRubric } from './components/InterviewRubric';
+import { InterviewerOverview } from './components/InterviewerOverview';
+import { CandidateFormData, CandidateIntakeForm } from './components/CandidateIntakeForm';
 
 interface InterviewData {
   jobTitle: string;
@@ -50,16 +52,47 @@ interface InterviewRubricData {
   rubrics: Rubric[];
 }
 
-type AppState = 'interviewer-dashboard' | 'competency-pillars' | 'interview-rubric';
+interface DashboardInterview {
+  interviewId: string;
+  jobTitle: string;
+  jobDescription: string;
+  experienceYears: string;
+  status: string;
+  createdAt: string;
+}
+
+interface DashboardCandidate {
+  candidateId: string;
+  fullName: string;
+  resume: string;
+  interviewId: string | null;
+  status: string;
+  createdAt: string;
+}
+
+type AppState =
+  | 'interviewer-overview'
+  | 'interviewer-dashboard'
+  | 'candidate-intake'
+  | 'competency-pillars'
+  | 'interview-rubric';
 
 export default function App() {
-  const [currentState, setCurrentState] = useState<AppState>('interviewer-dashboard');
+  const [currentState, setCurrentState] = useState<AppState>('interviewer-overview');
   const [interviewData, setInterviewData] = useState<InterviewData | null>(null);
   const [matrix, setMatrix] = useState<CompetencyMatrix | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [rubricData, setRubricData] = useState<InterviewRubricData | null>(null);
   const [isProceeding, setIsProceeding] = useState(false);
+  const [interviews, setInterviews] = useState<DashboardInterview[]>([]);
+  const [candidates, setCandidates] = useState<DashboardCandidate[]>([]);
+  const [isLoadingInterviews, setIsLoadingInterviews] = useState(false);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
+  const [interviewsError, setInterviewsError] = useState<string | null>(null);
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
+  const [candidateFormError, setCandidateFormError] = useState<string | null>(null);
+  const [isCandidateSubmitting, setIsCandidateSubmitting] = useState(false);
 
   const normalizeMatrix = (payload: unknown, fallback: InterviewData): CompetencyMatrix => {
     if (!payload || typeof payload !== 'object') {
@@ -91,6 +124,58 @@ export default function App() {
       competencyAreas,
       interviewId: String(data.interview_id ?? '').trim()
     };
+  };
+
+  const normalizeInterviews = (payload: unknown): DashboardInterview[] => {
+    if (!Array.isArray(payload)) {
+      return [];
+    }
+    return payload
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+        const row = item as Record<string, unknown>;
+        const interviewId = String(row.interview_id ?? '').trim();
+        if (!interviewId) {
+          return null;
+        }
+        return {
+          interviewId,
+          jobTitle: String(row.job_title ?? ''),
+          jobDescription: String(row.job_description ?? ''),
+          experienceYears: String(row.experience_years ?? ''),
+          status: String(row.status ?? ''),
+          createdAt: String(row.created_at ?? '')
+        } satisfies DashboardInterview;
+      })
+      .filter((entry): entry is DashboardInterview => Boolean(entry));
+  };
+
+  const normalizeCandidates = (payload: unknown): DashboardCandidate[] => {
+    if (!Array.isArray(payload)) {
+      return [];
+    }
+    return payload
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+        const row = item as Record<string, unknown>;
+        const candidateId = String(row.candidate_id ?? '').trim();
+        if (!candidateId) {
+          return null;
+        }
+        return {
+          candidateId,
+          fullName: String(row.full_name ?? ''),
+          resume: String(row.resume ?? ''),
+          interviewId: row.interview_id != null ? String(row.interview_id) : null,
+          status: String(row.status ?? ''),
+          createdAt: String(row.created_at ?? '')
+        } satisfies DashboardCandidate;
+      })
+      .filter((entry): entry is DashboardCandidate => Boolean(entry));
   };
 
   const normalizeRubric = (payload: unknown): InterviewRubricData | null => {
@@ -166,6 +251,57 @@ export default function App() {
     };
   };
 
+  const fetchInterviews = useCallback(async () => {
+    setIsLoadingInterviews(true);
+    setInterviewsError(null);
+    try {
+      const response = await fetch('/api/interviews');
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to load interviews.';
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      setInterviews(normalizeInterviews(payload));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load interviews.';
+      setInterviewsError(message);
+    } finally {
+      setIsLoadingInterviews(false);
+    }
+  }, []);
+
+  const fetchCandidates = useCallback(async () => {
+    setIsLoadingCandidates(true);
+    setCandidatesError(null);
+    try {
+      const response = await fetch('/api/candidates');
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to load candidates.';
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      setCandidates(normalizeCandidates(payload));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to load candidates.';
+      setCandidatesError(message);
+    } finally {
+      setIsLoadingCandidates(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchInterviews();
+    fetchCandidates();
+  }, [fetchInterviews, fetchCandidates]);
+
   const handleSubmitInterview = async (data: InterviewData) => {
     setErrorMessage(null);
     setIsLoading(true);
@@ -194,6 +330,7 @@ export default function App() {
       const payload = await response.json();
       const normalized = normalizeMatrix(payload, data);
       setMatrix(normalized);
+      fetchInterviews();
       setCurrentState('competency-pillars');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to analyze job description.';
@@ -235,9 +372,63 @@ export default function App() {
     }
   };
 
+  const handleCreateCandidate = async (data: CandidateFormData) => {
+    setCandidateFormError(null);
+    setIsCandidateSubmitting(true);
+    try {
+      const response = await fetch('/api/candidates', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          full_name: data.fullName,
+          resume: data.resume,
+          interview_id: data.interviewId,
+          status: data.status
+        })
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to save candidate.';
+        throw new Error(detail);
+      }
+      await fetchCandidates();
+      setCurrentState('interviewer-overview');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to save candidate.';
+      setCandidateFormError(message);
+    } finally {
+      setIsCandidateSubmitting(false);
+    }
+  };
+
   const dashboardInitialData = useMemo(() => interviewData ?? undefined, [interviewData]);
 
   switch (currentState) {
+    case 'interviewer-overview':
+      return (
+        <InterviewerOverview
+          interviews={interviews}
+          candidates={candidates}
+          onCreateInterview={() => {
+            setErrorMessage(null);
+            setCurrentState('interviewer-dashboard');
+          }}
+          onAddCandidate={() => {
+            setCandidateFormError(null);
+            setCurrentState('candidate-intake');
+          }}
+          isLoadingInterviews={isLoadingInterviews}
+          isLoadingCandidates={isLoadingCandidates}
+          interviewsError={interviewsError}
+          candidatesError={candidatesError}
+        />
+      );
+
     case 'interviewer-dashboard':
       return (
         <InterviewerDashboard
@@ -245,6 +436,24 @@ export default function App() {
           initialData={dashboardInitialData}
           isLoading={isLoading}
           errorMessage={errorMessage}
+          onBack={() => {
+            setErrorMessage(null);
+            setCurrentState('interviewer-overview');
+          }}
+        />
+      );
+
+    case 'candidate-intake':
+      return (
+        <CandidateIntakeForm
+          interviews={interviews.map((item) => ({ interviewId: item.interviewId, jobTitle: item.jobTitle }))}
+          onSubmit={handleCreateCandidate}
+          onCancel={() => {
+            setCandidateFormError(null);
+            setCurrentState('interviewer-overview');
+          }}
+          isSubmitting={isCandidateSubmitting}
+          errorMessage={candidateFormError}
         />
       );
 
@@ -280,11 +489,21 @@ export default function App() {
 
     default:
       return (
-        <InterviewerDashboard
-          onSubmitInterview={handleSubmitInterview}
-          initialData={dashboardInitialData}
-          isLoading={isLoading}
-          errorMessage={errorMessage}
+        <InterviewerOverview
+          interviews={interviews}
+          candidates={candidates}
+          onCreateInterview={() => {
+            setErrorMessage(null);
+            setCurrentState('interviewer-dashboard');
+          }}
+          onAddCandidate={() => {
+            setCandidateFormError(null);
+            setCurrentState('candidate-intake');
+          }}
+          isLoadingInterviews={isLoadingInterviews}
+          isLoadingCandidates={isLoadingCandidates}
+          interviewsError={interviewsError}
+          candidatesError={candidatesError}
         />
       );
   }

@@ -6,7 +6,6 @@ from textwrap import dedent
 from typing import Iterable, List, Literal
 from uuid import uuid4
 import sqlite3
-import time
 
 from pydantic import BaseModel, Field
 
@@ -67,7 +66,8 @@ class RubricStore:  # SQLite-backed rubric storage
                     job_title TEXT NOT NULL,
                     experience_years TEXT NOT NULL,
                     status TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    job_description TEXT DEFAULT ''
                 )
                 """
             )
@@ -84,19 +84,41 @@ class RubricStore:  # SQLite-backed rubric storage
                 """
             )
             conn.commit()
+            self._ensure_column(
+                conn,
+                "interview_ready",
+                "job_description",
+                "TEXT DEFAULT ''",
+            )
         finally:
             conn.close()
 
-    def save(self, interview_id: str, job_title: str, experience_years: str, rubrics: Iterable[Rubric]) -> None:  # Persist rubrics
+    def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:  # Ensure column exists
+        existing = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            conn.commit()
+
+    def save(
+        self,
+        interview_id: str,
+        job_title: str,
+        experience_years: str,
+        job_description: str,
+        rubrics: Iterable[Rubric],
+    ) -> None:  # Persist rubrics
         now = datetime.utcnow().isoformat(timespec="seconds")
         conn = self._connect()
         try:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO interview_ready (interview_id, job_title, experience_years, status, created_at)
-                VALUES (?, ?, ?, 'ready', ?)
+                INSERT OR REPLACE INTO interview_ready (interview_id, job_title, experience_years, status, created_at, job_description)
+                VALUES (?, ?, ?, 'ready', ?, ?)
                 """,
-                (interview_id, job_title, experience_years, now)
+                (interview_id, job_title, experience_years, now, job_description)
             )
             conn.executemany(
                 """
@@ -114,6 +136,20 @@ class RubricStore:  # SQLite-backed rubric storage
                 ]
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    def list_interviews(self) -> List[sqlite3.Row]:  # List stored interviews ordered by recency
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT interview_id, job_title, experience_years, status, created_at, job_description
+                FROM interview_ready
+                ORDER BY datetime(created_at) DESC, interview_id DESC
+                """
+            ).fetchall()
+            return list(rows)
         finally:
             conn.close()
 
@@ -142,7 +178,13 @@ class RubricStore:  # SQLite-backed rubric storage
             conn.close()
 
 
-def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricStore) -> str:  # Generate rubrics and persist
+def design_rubrics(
+    matrix: CompetencyMatrix,
+    *,
+    route: LlmRoute,
+    store: RubricStore,
+    job_description: str,
+) -> str:  # Generate rubrics and persist
     band = _infer_band(matrix.experience_years)
     rubrics: List[Rubric] = []
     areas = list(matrix.competency_areas)
@@ -160,15 +202,27 @@ def design_rubrics(matrix: CompetencyMatrix, *, route: LlmRoute, store: RubricSt
         # if index < len(areas) - 1:
         #     time.sleep(3)
     interview_id = uuid4().hex
-    store.save(interview_id, matrix.job_title, matrix.experience_years, rubrics)
+    store.save(
+        interview_id,
+        matrix.job_title,
+        matrix.experience_years,
+        job_description,
+        rubrics,
+    )
     return interview_id
 
 
-def design_with_config(matrix: CompetencyMatrix, *, config_path: Path, db_path: Path) -> str:  # Generate rubrics using config
+def design_with_config(
+    matrix: CompetencyMatrix,
+    *,
+    config_path: Path,
+    db_path: Path,
+    job_description: str,
+) -> str:  # Generate rubrics using config
     registry = load_app_registry(config_path, {"rubric_design.generate_rubric": Rubric})
     route, _ = registry["rubric_design.generate_rubric"]
     store = RubricStore(db_path)
-    return design_rubrics(matrix, route=route, store=store)
+    return design_rubrics(matrix, route=route, store=store, job_description=job_description)
 
 
 def load_rubrics(interview_id: str, *, db_path: Path) -> InterviewRubricSnapshot:  # Load stored rubrics
