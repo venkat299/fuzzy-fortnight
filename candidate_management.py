@@ -74,6 +74,30 @@ class CandidateStore:  # SQLite-backed candidate storage
         finally:
             conn.close()
 
+    def get_candidate(self, candidate_id: str) -> CandidateRecord:  # Retrieve candidate by id
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT candidate_id, full_name, resume, interview_id, status, created_at
+                FROM interview_candidates
+                WHERE candidate_id = ?
+                """,
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(candidate_id)
+            return CandidateRecord(
+                candidate_id=row["candidate_id"],
+                full_name=row["full_name"],
+                resume=row["resume"],
+                interview_id=row["interview_id"],
+                status=row["status"],
+                created_at=row["created_at"],
+            )
+        finally:
+            conn.close()
+
     def create_candidate(
         self,
         *,

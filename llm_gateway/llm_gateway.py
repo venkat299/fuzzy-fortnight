@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import threading
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Protocol, Tuple, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -12,6 +14,23 @@ from config import LlmRoute
 
 
 logger = logging.getLogger(__name__)  # Module logger setup
+
+
+def _configure_prompt_logger() -> logging.Logger:
+    prompt_logger = logging.getLogger("llm_prompts")
+    if prompt_logger.handlers:
+        return prompt_logger
+
+    log_path = Path(__file__).resolve().parent.parent / "prompts.log"
+    handler = RotatingFileHandler(log_path, maxBytes=1_000_000, backupCount=5, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s\t%(message)s"))
+    prompt_logger.addHandler(handler)
+    prompt_logger.setLevel(logging.INFO)
+    prompt_logger.propagate = False
+    return prompt_logger
+
+
+prompt_logger = _configure_prompt_logger()
 
 
 _MODEL_LOCKS: Dict[str, threading.Lock] = {}
@@ -95,6 +114,16 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
                 attempt + 1,
                 attempts,
                 preview,
+            )
+            prompt_logger.info(
+                json.dumps(
+                    {
+                        "route": cfg.name,
+                        "model": cfg.model,
+                        "attempt": attempt + 1,
+                        "prompt": messages,
+                    }
+                )
             )
             try:
                 response, close_cb = _post(f"{cfg.base_url}{cfg.endpoint}", payload, headers, cfg.timeout_s, client)

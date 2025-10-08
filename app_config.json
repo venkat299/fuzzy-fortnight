@@ -23,6 +23,8 @@
   },
   "registry": {
     "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
-    "rubric_design.generate_rubric": "qwen3-4b-local"
+    "rubric_design.generate_rubric": "qwen3-4b-local",
+    "interview_session.generate_question": "qwen3-4b-local",
+    "interview_evaluation.evaluate_response": "qwen3-4b-local"
   }
 }
