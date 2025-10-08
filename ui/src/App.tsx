@@ -100,6 +100,7 @@ export default function App() {
   const [isCandidateSubmitting, setIsCandidateSubmitting] = useState(false);
   const [currentSession, setCurrentSession] = useState<InterviewAssignment | null>(null);
   const [candidateToEdit, setCandidateToEdit] = useState<DashboardCandidate | null>(null);
+  const [shouldAutoStartSession, setShouldAutoStartSession] = useState(false);
 
   const normalizeMatrix = (payload: unknown, fallback: InterviewData): CompetencyMatrix => {
     if (!payload || typeof payload !== 'object') {
@@ -459,11 +460,13 @@ export default function App() {
     setErrorMessage(null);
     setIsProceeding(false);
     setCurrentSession(assignment);
+    setShouldAutoStartSession(true);
     setCurrentState('interview-session');
   };
 
   const closeInterviewSession = () => {
     setCurrentSession(null);
+    setShouldAutoStartSession(false);
     setCurrentState('interviewer-overview');
   };
 
@@ -586,6 +589,8 @@ export default function App() {
         <InterviewSessionPage
           assignment={currentSession}
           onBackToDashboard={closeInterviewSession}
+          autoStart={shouldAutoStartSession}
+          onAutoStartConsumed={() => setShouldAutoStartSession(false)}
         />
       );
 

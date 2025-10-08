@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from textwrap import dedent
 from typing import List
@@ -40,7 +41,10 @@ class CandidateAnswer(BaseModel):  # Candidate response with rubric context
 
 def evaluate_response(payload: CandidateAnswer, *, route: LlmRoute) -> EvaluationResult:  # Call LLM evaluator
     task = _build_task(payload)
-    return call(task, EvaluationResult, cfg=route)
+    logger.info("Evaluation prompt:\n%s", task)
+    result = call(task, EvaluationResult, cfg=route)
+    logger.info("Evaluation result:\n%s", result.model_dump_json(indent=2))
+    return result
 
 
 def evaluate_with_config(payload: CandidateAnswer, *, config_path: Path) -> EvaluationResult:  # Convenience helper
@@ -87,3 +91,4 @@ def _build_task(payload: CandidateAnswer) -> str:  # Compose evaluation prompt
         - Mark rubric_filled only when each criterion has sufficient evidence to justify an anchor-aligned score.
         """
     ).strip()
+logger = logging.getLogger("uvicorn.error")

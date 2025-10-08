@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from textwrap import dedent
-from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence, Tuple, TypedDict
+from threading import RLock
+from typing import Any, Callable, Dict, List, Literal, Optional, Protocol, Sequence, Tuple
 from uuid import uuid4
 
 from langchain.memory import ConversationEntityMemory
 from langchain.memory.chat_memory import BaseChatMemory
-from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from config import LlmRoute, load_app_registry
@@ -140,8 +142,16 @@ class InterviewEvent(BaseModel):  # Timeline event emitted by the flow
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
+class PendingQuestion(BaseModel):  # Question awaiting candidate response
+    question: GeneratedQuestion
+    stage: StageLiteral
+    competency: Optional[str]
+    asked_at: datetime
+
+
 class InterviewSessionState(BaseModel):  # Graph session state
     interview_id: str
+    session_id: str = Field(default_factory=lambda: uuid4().hex)
     stage: StageLiteral = "warmup"
     persona: PersonaConfig
     profile: CandidateProfile
@@ -153,6 +163,12 @@ class InterviewSessionState(BaseModel):  # Graph session state
     last_checkpoint: Optional[datetime] = None
     events: List["InterviewEvent"] = Field(default_factory=list)
     next_event_id: int = 1
+    started_at: datetime = Field(default_factory=datetime.utcnow)
+    last_activity: datetime = Field(default_factory=datetime.utcnow)
+    pending_question: Optional[PendingQuestion] = None
+    warmup_questions_asked: int = 0
+    wrapup_questions_asked: int = 0
+    questions_asked: int = 0
 
     def active_competency(self) -> Optional[Tuple[str, CompetencyRuntimeState]]:
         if 0 <= self.active_index < len(self.competency_order):
@@ -229,7 +245,13 @@ class QuestionGeneratorTool:  # Wrapper for question generator LLM
 
     def generate(self, context: QuestionContext) -> GeneratedQuestion:
         task = _build_question_task(context)
-        return call(task, GeneratedQuestion, cfg=self._route)
+        logger.info("Question generation prompt:\n%s", task)
+        result = call(task, GeneratedQuestion, cfg=self._route)
+        logger.info(
+            "Question generation result:\n%s",
+            result.model_dump_json(indent=2),
+        )
+        return result
 
 
 class RubricEvaluatorTool:  # Wrapper around evaluation module
@@ -265,178 +287,227 @@ class InterviewMemoryManager:  # Manage LangChain memory + checkpoints
         return []
 
 
-class InterviewGraphState(TypedDict):
-    session: InterviewSessionState
+class EngineStartResult(BaseModel):  # Start session snapshot
+    state: InterviewSessionState
+    events: List[InterviewEvent]
+    question: Optional[PendingQuestion]
 
 
-class FlowManagerAgent:  # LangGraph-based orchestrator
+class EngineTurnResult(BaseModel):  # Turn processing bundle
+    state: InterviewSessionState
+    events: List[InterviewEvent]
+    question: Optional[PendingQuestion]
+    evaluation: Optional[EvaluationResult]
+    completed: bool
+
+
+@dataclass
+class SessionRuntime:  # Stored session bundle
+    engine: "InterviewSessionEngine"
+    state: InterviewSessionState
+
+
+class SessionStore(Protocol):  # Session persistence interface
+    def create(self, session: SessionRuntime) -> None: ...
+
+    def get(self, session_id: str) -> SessionRuntime: ...
+
+    def save(self, session: SessionRuntime) -> None: ...
+
+    def delete(self, session_id: str) -> None: ...
+
+
+class InMemorySessionStore(SessionStore):  # Thread-safe in-memory store
+    def __init__(self) -> None:
+        self._sessions: Dict[str, SessionRuntime] = {}
+        self._lock = RLock()
+
+    def create(self, session: SessionRuntime) -> None:  # Persist new session
+        with self._lock:
+            self._sessions[session.state.session_id] = session
+
+    def get(self, session_id: str) -> SessionRuntime:  # Load session
+        with self._lock:
+            stored = self._sessions.get(session_id)
+        if stored is None:
+            raise KeyError(session_id)
+        return stored
+
+    def save(self, session: SessionRuntime) -> None:  # Update session bundle
+        with self._lock:
+            self._sessions[session.state.session_id] = session
+
+    def delete(self, session_id: str) -> None:  # Drop session state
+        with self._lock:
+            self._sessions.pop(session_id, None)
+
+
+class SessionNotFoundError(KeyError):  # Raised when session missing
+    pass
+
+
+class SessionExpiredError(RuntimeError):  # Raised when session expired
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self.session_id = session_id
+
+
+class SessionLifecycleConfig(BaseModel):  # Session timeout tuning
+    timeout_minutes: int = Field(default=30, ge=1)
+
+
+class InterviewSessionEngine:  # Interactive interview driver
     def __init__(
         self,
         question_tool: QuestionGeneratorTool,
         evaluator: RubricEvaluatorTool,
         memory: InterviewMemoryManager,
-        responder: CandidateResponder,
         config: InterviewFlowConfig,
     ) -> None:
         self._question_tool = question_tool
         self._evaluator = evaluator
         self._memory = memory
-        self._responder = responder
         self._config = config
-        self._graph = self._build_graph()
 
-    def run(self, plan: InterviewPlan) -> InterviewTranscript:
+    def start(self, plan: InterviewPlan) -> EngineStartResult:  # Begin interactive session
         state = plan.build_state()
-        compiled = self._graph.compile()
-        result = compiled.invoke({"session": state})
-        final_state = result["session"]
-        return InterviewTranscript(
-            interview_id=final_state.interview_id,
-            persona=final_state.persona,
-            profile=final_state.profile,
-            turns=final_state.transcript,
-            checkpoints=final_state.checkpoints,
-            competencies=final_state.competencies,
-            events=final_state.events,
-        )
+        state.stage = "warmup"
+        state.events = []
+        state.transcript = []
+        state.checkpoints = []
+        state.next_event_id = 1
+        now = datetime.utcnow()
+        state.started_at = now
+        state.last_activity = now
+        start_id = state.next_event_id
+        self._record_event(state, stage="warmup", event_type="stage_entered")
+        question = self._begin_warmup(state)
+        events = self._collect_events(state, start_id)
+        return EngineStartResult(state=state, events=events, question=question)
 
-    def _record_event(
-        self,
-        session: InterviewSessionState,
-        *,
-        stage: StageLiteral,
-        event_type: EventTypeLiteral,
-        competency: Optional[str] = None,
-        payload: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        event = InterviewEvent(
-            event_id=session.next_event_id,
-            created_at=datetime.utcnow(),
+    def answer(self, state: InterviewSessionState, answer: str) -> EngineTurnResult:  # Apply candidate answer
+        pending = state.pending_question
+        if pending is None:
+            raise ValueError("No pending question to answer")
+        state.pending_question = None
+        state.last_activity = datetime.utcnow()
+        start_id = state.next_event_id
+        stage = pending.stage
+        competency = pending.competency
+        self._record_event(
+            state,
             stage=stage,
+            event_type="answer",
             competency=competency,
-            event_type=event_type,
-            payload=payload or {},
+            payload={"answer": answer},
         )
-        session.events.append(event)
-        session.next_event_id += 1
-
-    def _build_graph(self) -> StateGraph[InterviewGraphState]:
-        graph: StateGraph[InterviewGraphState] = StateGraph(InterviewGraphState)
-        graph.add_node("warmup", self._warmup_stage)
-        graph.add_node("competency", self._competency_stage)
-        graph.add_node("wrapup", self._wrapup_stage)
-        graph.add_edge(START, "warmup")
-        graph.add_conditional_edges(
-            "warmup",
-            self._after_warmup,
-            {"competency": "competency", "wrapup": "wrapup"},
+        state.transcript.append(
+            InterviewTurn(role="candidate", stage=stage, competency=competency, content=answer)
         )
-        graph.add_conditional_edges(
-            "competency",
-            self._after_competency,
-            {"competency": "competency", "wrapup": "wrapup"},
+        self._memory.remember(pending.question.question, answer)
+        evaluation: Optional[EvaluationResult] = None
+        next_question: Optional[PendingQuestion]
+        if stage == "warmup":
+            next_question = self._after_warmup_answer(state)
+        elif stage == "competency":
+            evaluation = self._evaluate_competency_answer(state, pending, answer)
+            next_question = self._after_competency_answer(state)
+        elif stage == "wrapup":
+            next_question = self._after_wrapup_answer(state)
+        else:
+            raise ValueError(f"Unsupported stage {stage}")
+        events = self._collect_events(state, start_id)
+        completed = state.stage == "complete"
+        return EngineTurnResult(
+            state=state,
+            events=events,
+            question=next_question,
+            evaluation=evaluation,
+            completed=completed,
         )
-        graph.add_edge("wrapup", END)
-        return graph
 
-    def _after_warmup(self, state: InterviewGraphState) -> str:
-        session = state["session"]
-        if session.competency_order:
-            return "competency"
-        session.stage = "wrapup"
-        return "wrapup"
+    def _begin_warmup(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        if self._config.warmup_question_count <= 0:
+            return self._advance_after_warmup(state)
+        return self._generate_warmup_question(state)
 
-    def _after_competency(self, state: InterviewGraphState) -> str:
-        session = state["session"]
-        active = session.active_competency()
+    def _after_warmup_answer(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        checkpoint = self._maybe_checkpoint(state)
+        if checkpoint is not None:
+            self._record_checkpoint_event(state, "warmup", None, checkpoint)
+        if state.warmup_questions_asked < self._config.warmup_question_count:
+            return self._generate_warmup_question(state)
+        return self._advance_after_warmup(state)
+
+    def _advance_after_warmup(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        if state.competency_order:
+            return self._enter_competency(state)
+        return self._enter_wrapup(state)
+
+    def _enter_competency(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        active = state.active_competency()
         if active is None:
-            session.stage = "wrapup"
-            return "wrapup"
+            return self._enter_wrapup(state)
         name, runtime = active
-        if runtime.rubric_filled or len(runtime.questions) >= self._config.max_questions_per_competency:
-            session.active_index += 1
-            next_active = session.active_competency()
-            if next_active is None:
-                session.stage = "wrapup"
-                return "wrapup"
-            session.stage = "competency"
-            return "competency"
-        return "competency"
-
-    def _warmup_stage(self, state: InterviewGraphState) -> InterviewGraphState:
-        session = state["session"]
-        session.stage = "warmup"
-        self._record_event(session, stage="warmup", event_type="stage_entered")
-        for _ in range(self._config.warmup_question_count):
-            context = QuestionContext(
-                interview_id=session.interview_id,
-                stage="warmup",
-                persona=session.persona,
-                competency=None,
-                resume_summary=session.profile.resume_summary,
-                experiences=session.profile.highlighted_experiences,
-                candidate_name=session.profile.candidate_name,
-                rubric=None,
-                asked_questions=[turn.content for turn in session.transcript if turn.stage == "warmup"],
-                memory_entities=self._memory.entities(),
-            )
-            question = self._question_tool.generate(context)
-            self._record_event(
-                session,
-                stage="warmup",
-                event_type="question",
-                payload=question.model_dump(),
-            )
-            session.transcript.append(
-                InterviewTurn(role="interviewer", stage="warmup", competency=None, content=question.question)
-            )
-            answer_text = self._responder.respond(question, competency=None, stage="warmup")
-            self._record_event(
-                session,
-                stage="warmup",
-                event_type="answer",
-                payload={"answer": answer_text},
-            )
-            session.transcript.append(
-                InterviewTurn(role="candidate", stage="warmup", competency=None, content=answer_text)
-            )
-            self._memory.remember(question.question, answer_text)
-            checkpoint = self._maybe_checkpoint(session)
-            if checkpoint is not None:
-                self._record_event(
-                    session,
-                    stage="warmup",
-                    event_type="checkpoint",
-                    payload={
-                        "checkpoint_id": checkpoint.checkpoint_id,
-                        "saved_at": checkpoint.saved_at.isoformat(),
-                        "competency_scores": checkpoint.competency_scores,
-                    },
-                )
-        return state
-
-    def _competency_stage(self, state: InterviewGraphState) -> InterviewGraphState:
-        session = state["session"]
-        session.stage = "competency"
-        active = session.active_competency()
-        if active is None:
-            return state
-        name, runtime = active
+        state.stage = "competency"
         if not runtime.questions:
             self._record_event(
-                session,
+                state,
                 stage="competency",
                 event_type="stage_entered",
                 competency=name,
             )
+        return self._generate_competency_question(state, name, runtime)
+
+    def _after_competency_answer(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        active = state.active_competency()
+        if active is None:
+            return self._enter_wrapup(state)
+        name, runtime = active
+        if runtime.rubric_filled or len(runtime.questions) >= self._config.max_questions_per_competency:
+            state.active_index += 1
+            return self._enter_competency(state)
+        return self._generate_competency_question(state, name, runtime)
+
+    def _after_wrapup_answer(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        checkpoint = self._maybe_checkpoint(state, force=True)
+        if checkpoint is not None:
+            self._record_checkpoint_event(state, "wrapup", None, checkpoint)
+        state.stage = "complete"
+        return None
+
+    def _generate_warmup_question(self, state: InterviewSessionState) -> PendingQuestion:
         context = QuestionContext(
-            interview_id=session.interview_id,
+            interview_id=state.interview_id,
+            stage="warmup",
+            persona=state.persona,
+            competency=None,
+            resume_summary=state.profile.resume_summary,
+            experiences=state.profile.highlighted_experiences,
+            candidate_name=state.profile.candidate_name,
+            rubric=None,
+            asked_questions=[
+                turn.content for turn in state.transcript if turn.stage == "warmup" and turn.role == "interviewer"
+            ],
+            memory_entities=self._memory.entities(),
+        )
+        question = self._question_tool.generate(context)
+        return self._record_question(state, question, "warmup", None)
+
+    def _generate_competency_question(
+        self,
+        state: InterviewSessionState,
+        competency: str,
+        runtime: CompetencyRuntimeState,
+    ) -> PendingQuestion:
+        context = QuestionContext(
+            interview_id=state.interview_id,
             stage="competency",
-            persona=session.persona,
-            competency=name,
-            resume_summary=session.profile.resume_summary,
-            experiences=session.profile.highlighted_experiences,
-            candidate_name=session.profile.candidate_name,
+            persona=state.persona,
+            competency=competency,
+            resume_summary=state.profile.resume_summary,
+            experiences=state.profile.highlighted_experiences,
+            candidate_name=state.profile.candidate_name,
             rubric=runtime.rubric,
             asked_questions=runtime.questions,
             rubric_progress=runtime.total_score,
@@ -453,170 +524,263 @@ class FlowManagerAgent:  # LangGraph-based orchestrator
         )
         question = self._question_tool.generate(context)
         runtime.questions.append(question.question)
+        return self._record_question(state, question, "competency", competency)
+
+    def _generate_wrapup_question(self, state: InterviewSessionState) -> PendingQuestion:
+        context = QuestionContext(
+            interview_id=state.interview_id,
+            stage="wrapup",
+            persona=state.persona,
+            competency=None,
+            resume_summary=state.profile.resume_summary,
+            experiences=state.profile.highlighted_experiences,
+            candidate_name=state.profile.candidate_name,
+            rubric=None,
+            asked_questions=[
+                turn.content for turn in state.transcript if turn.stage == "wrapup" and turn.role == "interviewer"
+            ],
+            memory_entities=self._memory.entities(),
+        )
+        question = self._question_tool.generate(context)
+        return self._record_question(state, question, "wrapup", None)
+
+    def _enter_wrapup(self, state: InterviewSessionState) -> Optional[PendingQuestion]:
+        if state.stage != "wrapup":
+            state.stage = "wrapup"
+            self._record_event(state, stage="wrapup", event_type="stage_entered")
+        if state.wrapup_questions_asked > 0:
+            return None
+        return self._generate_wrapup_question(state)
+
+    def _record_question(
+        self,
+        state: InterviewSessionState,
+        question: GeneratedQuestion,
+        stage: StageLiteral,
+        competency: Optional[str],
+    ) -> PendingQuestion:
         self._record_event(
-            session,
-            stage="competency",
+            state,
+            stage=stage,
             event_type="question",
-            competency=name,
+            competency=competency,
             payload=question.model_dump(),
         )
-        session.transcript.append(
-            InterviewTurn(role="interviewer", stage="competency", competency=name, content=question.question)
+        state.transcript.append(
+            InterviewTurn(role="interviewer", stage=stage, competency=competency, content=question.question)
         )
-        answer_text = self._responder.respond(question, competency=name, stage="competency")
-        self._record_event(
-            session,
-            stage="competency",
-            event_type="answer",
-            competency=name,
-            payload={"answer": answer_text},
+        if stage == "warmup":
+            state.warmup_questions_asked += 1
+        elif stage == "wrapup":
+            state.wrapup_questions_asked += 1
+        state.questions_asked += 1
+        pending = PendingQuestion(
+            question=question,
+            stage=stage,
+            competency=competency,
+            asked_at=datetime.utcnow(),
         )
-        session.transcript.append(
-            InterviewTurn(role="candidate", stage="competency", competency=name, content=answer_text)
-        )
-        self._memory.remember(question.question, answer_text)
+        state.pending_question = pending
+        return pending
+
+    def _evaluate_competency_answer(
+        self,
+        state: InterviewSessionState,
+        pending: PendingQuestion,
+        answer: str,
+    ) -> EvaluationResult:
+        competency = pending.competency
+        if competency is None:
+            raise ValueError("Competency answer missing competency name")
+        runtime = state.competencies[competency]
         evaluation = self._evaluator.evaluate(
             CandidateAnswer(
-                interview_id=session.interview_id,
-                competency=name,
-                question=question.question,
-                answer=answer_text,
+                interview_id=state.interview_id,
+                competency=competency,
+                question=pending.question.question,
+                answer=answer,
                 rubric=runtime.rubric,
-                persona=session.persona.name,
+                persona=state.persona.name,
                 stage="competency",
                 asked_follow_ups=runtime.questions,
             )
         )
         runtime.apply_evaluation(evaluation)
         self._record_event(
-            session,
+            state,
             stage="competency",
             event_type="evaluation",
-            competency=name,
+            competency=competency,
             payload=evaluation.model_dump(),
         )
         if evaluation.follow_up_needed and not runtime.rubric_filled:
-            session.transcript.append(
+            self._record_event(
+                state,
+                stage="competency",
+                event_type="follow_up",
+                competency=competency,
+                payload={"message": "Evaluator suggests a probing follow-up."},
+            )
+            state.transcript.append(
                 InterviewTurn(
                     role="system",
                     stage="competency",
-                    competency=name,
+                    competency=competency,
                     content="Evaluator suggests a probing follow-up.",
                 )
             )
-            self._record_event(
-                session,
-                stage="competency",
-                event_type="follow_up",
-                competency=name,
-                payload={"message": "Evaluator suggests a probing follow-up."},
-            )
         if evaluation.hints:
             for hint in evaluation.hints:
-                session.transcript.append(
+                self._record_event(
+                    state,
+                    stage="competency",
+                    event_type="hint",
+                    competency=competency,
+                    payload={"hint": hint},
+                )
+                state.transcript.append(
                     InterviewTurn(
                         role="system",
                         stage="competency",
-                        competency=name,
+                        competency=competency,
                         content=f"Hint: {hint}",
                     )
                 )
-                self._record_event(
-                    session,
-                    stage="competency",
-                    event_type="hint",
-                    competency=name,
-                    payload={"hint": hint},
-                )
-        checkpoint = self._maybe_checkpoint(session)
+        checkpoint = self._maybe_checkpoint(state)
         if checkpoint is not None:
-            self._record_event(
-                session,
-                stage="competency",
-                event_type="checkpoint",
-                competency=name,
-                payload={
-                    "checkpoint_id": checkpoint.checkpoint_id,
-                    "saved_at": checkpoint.saved_at.isoformat(),
-                    "competency_scores": checkpoint.competency_scores,
-                },
-            )
-        return state
+            self._record_checkpoint_event(state, "competency", competency, checkpoint)
+        return evaluation
 
-    def _wrapup_stage(self, state: InterviewGraphState) -> InterviewGraphState:
-        session = state["session"]
-        if session.stage == "complete":
-            return state
-        session.stage = "wrapup"
-        self._record_event(session, stage="wrapup", event_type="stage_entered")
-        context = QuestionContext(
-            interview_id=session.interview_id,
-            stage="wrapup",
-            persona=session.persona,
-            competency=None,
-            resume_summary=session.profile.resume_summary,
-            experiences=session.profile.highlighted_experiences,
-            candidate_name=session.profile.candidate_name,
-            rubric=None,
-            asked_questions=[turn.content for turn in session.transcript if turn.stage == "wrapup"],
-            memory_entities=self._memory.entities(),
-        )
-        question = self._question_tool.generate(context)
+    def _record_checkpoint_event(
+        self,
+        state: InterviewSessionState,
+        stage: StageLiteral,
+        competency: Optional[str],
+        checkpoint: InterviewCheckpoint,
+    ) -> None:
         self._record_event(
-            session,
-            stage="wrapup",
-            event_type="question",
-            payload=question.model_dump(),
+            state,
+            stage=stage,
+            event_type="checkpoint",
+            competency=competency,
+            payload={
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "saved_at": checkpoint.saved_at.isoformat(),
+                "competency_scores": checkpoint.competency_scores,
+            },
         )
-        session.transcript.append(
-            InterviewTurn(role="interviewer", stage="wrapup", competency=None, content=question.question)
+
+    def _collect_events(self, state: InterviewSessionState, start_id: int) -> List[InterviewEvent]:
+        return [event for event in state.events if event.event_id >= start_id]
+
+    def _record_event(
+        self,
+        state: InterviewSessionState,
+        *,
+        stage: StageLiteral,
+        event_type: EventTypeLiteral,
+        competency: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        event = InterviewEvent(
+            event_id=state.next_event_id,
+            created_at=datetime.utcnow(),
+            stage=stage,
+            competency=competency,
+            event_type=event_type,
+            payload=payload or {},
         )
-        answer_text = self._responder.respond(question, competency=None, stage="wrapup")
-        self._record_event(
-            session,
-            stage="wrapup",
-            event_type="answer",
-            payload={"answer": answer_text},
-        )
-        session.transcript.append(
-            InterviewTurn(role="candidate", stage="wrapup", competency=None, content=answer_text)
-        )
-        self._memory.remember(question.question, answer_text)
-        session.stage = "complete"
-        checkpoint = self._maybe_checkpoint(session, force=True)
-        if checkpoint is not None:
-            self._record_event(
-                session,
-                stage="wrapup",
-                event_type="checkpoint",
-                payload={
-                    "checkpoint_id": checkpoint.checkpoint_id,
-                    "saved_at": checkpoint.saved_at.isoformat(),
-                    "competency_scores": checkpoint.competency_scores,
-                },
-            )
-        return state
+        state.events.append(event)
+        state.next_event_id += 1
 
     def _maybe_checkpoint(
         self,
-        session: InterviewSessionState,
+        state: InterviewSessionState,
         *,
         force: bool = False,
     ) -> Optional[InterviewCheckpoint]:
         now = datetime.utcnow()
-        if force or session.last_checkpoint is None:
-            checkpoint = self._memory.checkpoints.save(session)
-            session.checkpoints.append(checkpoint)
-            session.last_checkpoint = checkpoint.saved_at
+        if force or state.last_checkpoint is None:
+            checkpoint = self._memory.checkpoints.save(state)
+            state.checkpoints.append(checkpoint)
+            state.last_checkpoint = checkpoint.saved_at
             return checkpoint
-        elapsed = now - session.last_checkpoint
+        elapsed = now - state.last_checkpoint
         if elapsed >= timedelta(minutes=self._config.checkpoint_interval_minutes):
-            checkpoint = self._memory.checkpoints.save(session)
-            session.checkpoints.append(checkpoint)
-            session.last_checkpoint = checkpoint.saved_at
+            checkpoint = self._memory.checkpoints.save(state)
+            state.checkpoints.append(checkpoint)
+            state.last_checkpoint = checkpoint.saved_at
             return checkpoint
         return None
 
+
+class SessionStartResult(BaseModel):  # Managed session start payload
+    session_id: str
+    state: InterviewSessionState
+    events: List[InterviewEvent]
+    question: Optional[PendingQuestion]
+
+
+class SessionTurnResult(BaseModel):  # Managed turn payload
+    session_id: str
+    state: InterviewSessionState
+    events: List[InterviewEvent]
+    question: Optional[PendingQuestion]
+    evaluation: Optional[EvaluationResult]
+    completed: bool
+
+
+class InterviewSessionManager:  # Session lifecycle orchestrator
+    def __init__(
+        self,
+        engine_factory: Callable[[], InterviewSessionEngine],
+        store: SessionStore,
+        lifecycle: SessionLifecycleConfig,
+    ) -> None:
+        self._engine_factory = engine_factory
+        self._store = store
+        self._lifecycle = lifecycle
+
+    def start_session(self, plan: InterviewPlan) -> SessionStartResult:  # Start and persist session
+        engine = self._engine_factory()
+        result = engine.start(plan)
+        runtime = SessionRuntime(engine=engine, state=result.state)
+        self._store.create(runtime)
+        return SessionStartResult(
+            session_id=result.state.session_id,
+            state=result.state,
+            events=result.events,
+            question=result.question,
+        )
+
+    def submit_answer(self, session_id: str, answer: str) -> SessionTurnResult:  # Process candidate turn
+        try:
+            runtime = self._store.get(session_id)
+        except KeyError as exc:
+            raise SessionNotFoundError(session_id) from exc
+        state = runtime.state
+        if self._is_expired(state):
+            self._store.delete(session_id)
+            raise SessionExpiredError(session_id)
+        turn = runtime.engine.answer(state, answer)
+        if turn.completed:
+            self._store.delete(session_id)
+        else:
+            runtime.state = turn.state
+            self._store.save(runtime)
+        return SessionTurnResult(
+            session_id=session_id,
+            state=turn.state,
+            events=turn.events,
+            question=turn.question,
+            evaluation=turn.evaluation,
+            completed=turn.completed,
+        )
+
+    def _is_expired(self, state: InterviewSessionState) -> bool:  # Determine timeout
+        age = datetime.utcnow() - state.last_activity
+        limit = timedelta(minutes=self._lifecycle.timeout_minutes)
+        return age > limit
 
 def start_interview(
     plan: InterviewPlan,
@@ -638,8 +802,27 @@ def start_interview(
         memory = InterviewMemoryManager(entity_memory, CheckpointMemory())
     if config is None:
         config = InterviewFlowConfig()
-    agent = FlowManagerAgent(question_tool, evaluator, memory, responder, config)
-    return agent.run(plan)
+    engine = InterviewSessionEngine(question_tool, evaluator, memory, config)
+    start_bundle = engine.start(plan)
+    state = start_bundle.state
+    pending = start_bundle.question
+    while pending is not None:
+        answer_text = responder.respond(
+            pending.question,
+            competency=pending.competency,
+            stage=pending.stage,
+        )
+        turn_bundle = engine.answer(state, answer_text)
+        pending = turn_bundle.question
+    return InterviewTranscript(
+        interview_id=state.interview_id,
+        persona=state.persona,
+        profile=state.profile,
+        turns=state.transcript,
+        checkpoints=state.checkpoints,
+        competencies=state.competencies,
+        events=state.events,
+    )
 
 
 def build_session_with_config(
@@ -858,3 +1041,4 @@ def _adaptive_rules_blurb() -> str:
         - Maintain interrupt readiness by ensuring each question could serve as a checkpoint boundary with recap-worthy context.
         """
     ).strip()
+logger = logging.getLogger("uvicorn.error")

@@ -7,12 +7,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
+from config import load_app_registry
 from jd_analysis import CompetencyMatrix, JobProfile, analyze_with_config
 from llm_gateway import LlmGatewayError
 
 from candidate_management import CandidateRecord, CandidateStore
+from interview_evaluation import EvaluationResult
 from rubric_design import (
     InterviewRubricSnapshot,
     RubricStore,
@@ -22,15 +24,25 @@ from rubric_design import (
 from interview_session import (
     CandidateProfile,
     CandidateResponder,
+    CheckpointMemory,
     GeneratedQuestion,
+    InMemorySessionStore,
     InterviewEvent,
+    InterviewFlowConfig,
+    InterviewMemoryManager,
     InterviewPlan,
-    InterviewTranscript,
+    InterviewSessionEngine,
+    InterviewSessionManager,
     PersonaConfig,
+    PendingQuestion,
+    QuestionGeneratorTool,
+    RubricEvaluatorTool,
+    SessionExpiredError,
+    SessionLifecycleConfig,
+    SessionNotFoundError,
     StageLiteral,
-    build_session_with_config,
 )
-from interview_session.interview_session import EventTypeLiteral
+from interview_session.interview_session import EventTypeLiteral, InterviewSessionState
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +59,14 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+_SESSION_SCHEMAS: Dict[str, type[BaseModel]] = {
+    "interview_session.generate_question": GeneratedQuestion,
+    "interview_evaluation.evaluate_response": EvaluationResult,
+}
+_SESSION_REGISTRY = load_app_registry(CONFIG_PATH, _SESSION_SCHEMAS)
+_QUESTION_ROUTE, _ = _SESSION_REGISTRY["interview_session.generate_question"]
+_EVALUATION_ROUTE, _ = _SESSION_REGISTRY["interview_evaluation.evaluate_response"]
+_SESSION_STORE = InMemorySessionStore()
 
 class AnalyzeRequest(BaseModel):  # Request payload from UI
     jobTitle: str
@@ -96,13 +116,6 @@ class StartSessionRequest(BaseModel):  # Start interview session payload
     persona: Optional[SessionPersonaSettings] = None
 
 
-class SessionTurn(BaseModel):  # Transcript turn returned to UI
-    role: str
-    stage: StageLiteral
-    competency: Optional[str]
-    content: str
-
-
 class SessionCriterionState(BaseModel):  # Criterion progress entry
     competency: str
     criterion: str
@@ -127,13 +140,79 @@ class SessionEvent(BaseModel):  # Serialized event for UI playback
     payload: Dict[str, Any]
 
 
-class InterviewSessionResponse(BaseModel):  # Session run response for UI
-    interview_id: str
+class QuestionMetadata(BaseModel):  # Question context for UI
+    model_config = ConfigDict(populate_by_name=True)
+
+    stage: StageLiteral
+    competency: Optional[str]
+    reasoning: str
+    escalation: str
+    follow_up_prompt: str = Field(alias="followUpPrompt")
+
+
+class QuestionPayload(BaseModel):  # Outgoing interviewer prompt
+    model_config = ConfigDict(populate_by_name=True)
+
+    content: str
+    metadata: QuestionMetadata
+
+
+class EvaluationCriterionPayload(BaseModel):  # Per-criterion evaluation summary
+    model_config = ConfigDict(populate_by_name=True)
+
+    criterion: str
+    score: float
+    weight: float
+    rationale: str
+
+
+class EvaluationPayload(BaseModel):  # Aggregated evaluation feedback
+    model_config = ConfigDict(populate_by_name=True)
+
+    summary: str
+    total_score: float = Field(alias="totalScore")
+    rubric_filled: bool = Field(alias="rubricFilled")
+    criterion_scores: List[EvaluationCriterionPayload] = Field(alias="criterionScores")
+    hints: List[str]
+    follow_up_needed: bool = Field(alias="followUpNeeded")
+
+
+class StartSessionResponse(BaseModel):  # Interactive session start payload
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    stage: StageLiteral
     persona: PersonaConfig
     profile: CandidateProfile
-    turns: List[SessionTurn]
+    question: Optional[QuestionPayload]
     events: List[SessionEvent]
     competencies: List[SessionCompetencyState]
+    overall_score: float = Field(alias="overallScore")
+    questions_asked: int = Field(alias="questionsAsked")
+    elapsed_ms: int = Field(alias="elapsedMs")
+
+
+class TurnRequest(BaseModel):  # Candidate response payload
+    model_config = ConfigDict(populate_by_name=True)
+
+    session_id: str = Field(alias="sessionId")
+    answer: str
+    auto_send: Optional[bool] = Field(default=None, alias="autoSend")
+    auto_generate: Optional[bool] = Field(default=None, alias="autoGenerate")
+
+
+class TurnResponse(BaseModel):  # Interactive turn response
+    model_config = ConfigDict(populate_by_name=True)
+
+    stage: StageLiteral
+    question: Optional[QuestionPayload]
+    evaluation: Optional[EvaluationPayload]
+    events: List[SessionEvent]
+    competencies: List[SessionCompetencyState]
+    overall_score: float = Field(alias="overallScore")
+    questions_asked: int = Field(alias="questionsAsked")
+    elapsed_ms: int = Field(alias="elapsedMs")
+    completed: bool
 
 
 class ResumeEchoResponder:  # Simple candidate responder for demo playback
@@ -180,6 +259,24 @@ DEFAULT_PERSONA = PersonaConfig(  # Default persona for sessions
 )
 
 
+def _build_engine() -> InterviewSessionEngine:  # Factory for interactive engines
+    memory = InterviewMemoryManager(entity_memory=None, checkpoints=CheckpointMemory())
+    question_tool = QuestionGeneratorTool(_QUESTION_ROUTE)
+    evaluator = RubricEvaluatorTool(_EVALUATION_ROUTE)
+    return InterviewSessionEngine(
+        question_tool=question_tool,
+        evaluator=evaluator,
+        memory=memory,
+        config=InterviewFlowConfig(),
+    )
+
+
+_SESSION_MANAGER = InterviewSessionManager(
+    engine_factory=_build_engine,
+    store=_SESSION_STORE,
+    lifecycle=SessionLifecycleConfig(),
+)
+
 def _resolve_persona(settings: Optional[SessionPersonaSettings]) -> PersonaConfig:  # Merge persona overrides
     if settings is None:
         return DEFAULT_PERSONA.model_copy()
@@ -211,18 +308,6 @@ def _build_candidate_profile(record: CandidateRecord) -> CandidateProfile:  # Co
     )
 
 
-def _serialize_turns(transcript: InterviewTranscript) -> List[SessionTurn]:  # Convert turns for API
-    return [
-        SessionTurn(
-            role=turn.role,
-            stage=turn.stage,
-            competency=turn.competency,
-            content=turn.content,
-        )
-        for turn in transcript.turns
-    ]
-
-
 def _serialize_events(events: List[InterviewEvent]) -> List[SessionEvent]:  # Convert events for API
     return [
         SessionEvent(
@@ -237,9 +322,32 @@ def _serialize_events(events: List[InterviewEvent]) -> List[SessionEvent]:  # Co
     ]
 
 
-def _serialize_competencies(transcript: InterviewTranscript) -> List[SessionCompetencyState]:  # Convert scoring
+def _serialize_competencies(state: InterviewSessionState) -> List[SessionCompetencyState]:  # Convert scoring
     states: List[SessionCompetencyState] = []
-    for name, runtime in transcript.competencies.items():
+    ordered = list(state.competency_order)
+    for name in ordered:
+        runtime = state.competencies[name]
+        criteria = [
+            SessionCriterionState(
+                competency=name,
+                criterion=progress.criterion,
+                weight=progress.weight,
+                latest_score=progress.latest_score,
+                rationale=progress.rationale,
+            )
+            for progress in runtime.criteria.values()
+        ]
+        states.append(
+            SessionCompetencyState(
+                competency=name,
+                total_score=runtime.total_score,
+                rubric_filled=runtime.rubric_filled,
+                criteria=criteria,
+            )
+        )
+    for name, runtime in state.competencies.items():
+        if name in ordered:
+            continue
         criteria = [
             SessionCriterionState(
                 competency=name,
@@ -259,6 +367,65 @@ def _serialize_competencies(transcript: InterviewTranscript) -> List[SessionComp
             )
         )
     return states
+
+
+def _serialize_question(pending: Optional[PendingQuestion]) -> Optional[QuestionPayload]:  # Convert pending question
+    if pending is None:
+        return None
+    question = pending.question
+    return QuestionPayload(
+        content=question.question,
+        metadata=QuestionMetadata(
+            stage=pending.stage,
+            competency=pending.competency,
+            reasoning=question.reasoning,
+            escalation=question.escalation,
+            follow_up_prompt=question.follow_up_prompt,
+        ),
+    )
+
+
+def _serialize_evaluation(
+    state: InterviewSessionState,
+    evaluation: Optional[EvaluationResult],
+) -> Optional[EvaluationPayload]:  # Convert evaluation result
+    if evaluation is None:
+        return None
+    runtime = state.competencies.get(evaluation.competency)
+    criteria: List[EvaluationCriterionPayload] = []
+    if runtime is not None:
+        for item in evaluation.criterion_scores:
+            weight = runtime.criteria.get(item.criterion, None)
+            criteria.append(
+                EvaluationCriterionPayload(
+                    criterion=item.criterion,
+                    score=item.score,
+                    weight=(weight.weight if weight else 0.0),
+                    rationale=item.rationale,
+                )
+            )
+    return EvaluationPayload(
+        summary=evaluation.summary,
+        total_score=evaluation.total_score,
+        rubric_filled=evaluation.rubric_filled,
+        criterion_scores=criteria,
+        hints=evaluation.hints,
+        follow_up_needed=evaluation.follow_up_needed,
+    )
+
+
+def _compute_overall_score(state: InterviewSessionState) -> float:  # Aggregate overall score
+    if not state.competencies:
+        return 0.0
+    total = sum(runtime.total_score for runtime in state.competencies.values())
+    return total / max(len(state.competencies), 1)
+
+
+def _elapsed_ms(state: InterviewSessionState) -> int:  # Compute elapsed session time
+    baseline = state.started_at
+    latest = state.last_activity or baseline
+    delta = latest - baseline
+    return max(0, int(delta.total_seconds() * 1000))
 
 @app.post("/api/competency-matrix", response_model=CompetencyMatrixResponse)
 def create_competency_matrix(payload: AnalyzeRequest) -> CompetencyMatrixResponse:  # Generate competency matrix response
@@ -341,8 +508,8 @@ def create_candidate(payload: CreateCandidateRequest) -> CandidateRecord:  # Per
         raise HTTPException(status_code=500, detail="Unable to create candidate") from exc
 
 
-@app.post("/api/interview-sessions/run", response_model=InterviewSessionResponse)
-def run_interview_session(payload: StartSessionRequest) -> InterviewSessionResponse:  # Execute interview flow
+@app.post("/api/interview-sessions/start", response_model=StartSessionResponse)
+def start_interview_session(payload: StartSessionRequest) -> StartSessionResponse:  # Initialize interactive session
     candidate_store = CandidateStore(DATA_PATH)
     try:
         candidate = candidate_store.get_candidate(payload.candidate_id)
@@ -360,26 +527,59 @@ def run_interview_session(payload: StartSessionRequest) -> InterviewSessionRespo
         profile=profile,
         rubrics=snapshot.rubrics,
     )
-    responder: CandidateResponder = ResumeEchoResponder(profile)
     try:
-        transcript = build_session_with_config(
-            plan,
-            responder,
-            config_path=CONFIG_PATH,
-        )
+        start = _SESSION_MANAGER.start_session(plan)
     except LlmGatewayError as exc:
-        logger.exception("LLM request failed during interview session")
+        logger.exception("LLM request failed during interactive session start")
         raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Unable to run interview session")
-        raise HTTPException(status_code=500, detail="Unable to run interview session") from exc
-    return InterviewSessionResponse(
-        interview_id=transcript.interview_id,
-        persona=transcript.persona,
-        profile=transcript.profile,
-        turns=_serialize_turns(transcript),
-        events=_serialize_events(transcript.events),
-        competencies=_serialize_competencies(transcript),
+        logger.exception("Unable to start interview session")
+        raise HTTPException(status_code=500, detail="Unable to start interview session") from exc
+    state = start.state
+    return StartSessionResponse(
+        session_id=start.session_id,
+        stage=state.stage,
+        persona=state.persona,
+        profile=state.profile,
+        question=_serialize_question(start.question),
+        events=_serialize_events(start.events),
+        competencies=_serialize_competencies(state),
+        overall_score=_compute_overall_score(state),
+        questions_asked=state.questions_asked,
+        elapsed_ms=_elapsed_ms(state),
+    )
+
+
+@app.post("/api/interview-sessions/turn", response_model=TurnResponse)
+def advance_interview_session(payload: TurnRequest) -> TurnResponse:  # Process candidate answer
+    answer = payload.answer.strip()
+    if not answer:
+        raise HTTPException(status_code=400, detail="Answer cannot be empty")
+    try:
+        turn = _SESSION_MANAGER.submit_answer(payload.session_id, answer)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=401, detail="Session not found") from exc
+    except SessionExpiredError as exc:
+        raise HTTPException(status_code=410, detail="Session expired") from exc
+    except LlmGatewayError as exc:
+        logger.exception("LLM request failed during interactive turn")
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Interactive session turn failed")
+        raise HTTPException(status_code=500, detail="Unable to process answer") from exc
+    state = turn.state
+    return TurnResponse(
+        stage=state.stage,
+        question=_serialize_question(turn.question),
+        evaluation=_serialize_evaluation(state, turn.evaluation),
+        events=_serialize_events(turn.events),
+        competencies=_serialize_competencies(state),
+        overall_score=_compute_overall_score(state),
+        questions_asked=state.questions_asked,
+        elapsed_ms=_elapsed_ms(state),
+        completed=turn.completed,
     )
 
 

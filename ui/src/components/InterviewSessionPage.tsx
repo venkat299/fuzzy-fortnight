@@ -1,5 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Pause, Play, Send, Square } from "lucide-react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { ArrowLeft, Loader2, Pause, Play, Send, Square } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -27,6 +33,8 @@ import type { InterviewAssignment } from "./InterviewerOverview";
 interface InterviewSessionPageProps {
   assignment: InterviewAssignment;
   onBackToDashboard: () => void;
+  autoStart?: boolean;
+  onAutoStartConsumed?: () => void;
 }
 
 interface ChatMessage {
@@ -34,6 +42,7 @@ interface ChatMessage {
   speaker: "Candidate" | "Interviewer" | "System";
   content: string;
   tone: "neutral" | "positive";
+  pending?: boolean;
 }
 
 interface CriterionRow {
@@ -84,7 +93,6 @@ interface SessionEvent {
 }
 
 interface SessionCriterion {
-  competency: string;
   criterion: string;
   weight: number;
   latestScore: number;
@@ -98,14 +106,64 @@ interface SessionCompetencyState {
   criteria: SessionCriterion[];
 }
 
-interface SessionData {
+interface SessionMeta {
   persona: PersonaSettings;
   profile: CandidateProfileSummary;
-  events: SessionEvent[];
-  competencies: SessionCompetencyState[];
 }
 
-const EVENT_DELAY_MS = 1200;
+interface QuestionMetadata {
+  stage: StageLiteral;
+  competency: string | null;
+  reasoning: string;
+  escalation: string;
+  followUpPrompt: string;
+}
+
+interface QuestionPayload {
+  content: string;
+  metadata: QuestionMetadata;
+}
+
+interface EvaluationCriterionPayload {
+  criterion: string;
+  score: number;
+  weight: number;
+  rationale: string;
+}
+
+interface EvaluationPayload {
+  summary: string;
+  totalScore: number;
+  rubricFilled: boolean;
+  criterionScores: EvaluationCriterionPayload[];
+  hints: string[];
+  followUpNeeded: boolean;
+}
+
+interface InteractiveSessionStart {
+  sessionId: string;
+  stage: StageLiteral;
+  persona: PersonaSettings;
+  profile: CandidateProfileSummary;
+  question: QuestionPayload | null;
+  events: SessionEvent[];
+  competencies: SessionCompetencyState[];
+  overallScore: number;
+  questionsAsked: number;
+  elapsedMs: number;
+}
+
+interface InteractiveTurnSnapshot {
+  stage: StageLiteral;
+  question: QuestionPayload | null;
+  evaluation: EvaluationPayload | null;
+  events: SessionEvent[];
+  competencies: SessionCompetencyState[];
+  overallScore: number;
+  questionsAsked: number;
+  elapsedMs: number;
+  completed: boolean;
+}
 
 const STAGE_LABELS: Record<StageLiteral, string> = {
   warmup: "Warmup",
@@ -113,6 +171,22 @@ const STAGE_LABELS: Record<StageLiteral, string> = {
   wrapup: "Wrap-up",
   complete: "Complete",
 };
+
+const STAGE_PROGRESS: Record<StageLiteral, number> = {
+  warmup: 10,
+  competency: 60,
+  wrapup: 90,
+  complete: 100,
+};
+
+const QUESTION_ESCALATIONS = new Set([
+  "broad",
+  "why",
+  "how",
+  "challenge",
+  "hint",
+  "edge",
+]);
 
 const generateId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -145,133 +219,414 @@ const toLevel = (value: number): 1 | 2 | 3 | 4 | 5 => {
   return clamped as 1 | 2 | 3 | 4 | 5;
 };
 
-const normalizeSessionResponse = (payload: unknown): SessionData | null => {
+const normalizePersona = (input: unknown): PersonaSettings => {
+  const raw = (input && typeof input === "object"
+    ? input
+    : {}) as Record<string, unknown>;
+  return {
+    name: String(raw.name ?? ""),
+    probingStyle: String(raw.probing_style ?? raw.probingStyle ?? ""),
+    hintStyle: String(raw.hint_style ?? raw.hintStyle ?? ""),
+    encouragement: String(raw.encouragement ?? ""),
+  };
+};
+
+const normalizeProfile = (input: unknown): CandidateProfileSummary => {
+  const raw = (input && typeof input === "object"
+    ? input
+    : {}) as Record<string, unknown>;
+  const experiencesRaw = Array.isArray(raw.highlighted_experiences)
+    ? raw.highlighted_experiences
+    : Array.isArray(raw.highlightedExperiences)
+      ? raw.highlightedExperiences
+      : [];
+  const experiences = experiencesRaw
+    .map((item) => String(item ?? ""))
+    .filter((entry) => entry.trim().length > 0);
+  return {
+    candidateName: String(raw.candidate_name ?? raw.candidateName ?? ""),
+    resumeSummary: String(raw.resume_summary ?? raw.resumeSummary ?? ""),
+    experienceYears: String(raw.experience_years ?? raw.experienceYears ?? ""),
+    highlightedExperiences: experiences,
+  };
+};
+
+const normalizeStage = (stage: unknown): StageLiteral => {
+  const value = String(stage ?? "");
+  if (
+    (["warmup", "competency", "wrapup", "complete"] as const).includes(
+      value as StageLiteral,
+    )
+  ) {
+    return value as StageLiteral;
+  }
+  return "warmup";
+};
+
+const normalizeEvents = (payload: unknown): SessionEvent[] => {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+  const events: SessionEvent[] = [];
+  payload.forEach((item) => {
+    if (!item || typeof item !== "object") {
+      return;
+    }
+    const raw = item as Record<string, unknown>;
+    const eventId = Number(raw.event_id ?? raw.eventId ?? Number.NaN);
+    if (!Number.isFinite(eventId)) {
+      return;
+    }
+    const stage = normalizeStage(raw.stage);
+    const eventType = String(
+      raw.event_type ?? raw.eventType ?? "",
+    ) as EventType;
+    if (
+      !(
+        [
+          "stage_entered",
+          "question",
+          "answer",
+          "evaluation",
+          "hint",
+          "follow_up",
+          "checkpoint",
+        ] as const
+      ).includes(eventType)
+    ) {
+      return;
+    }
+    const competencyRaw = raw.competency;
+    const competency =
+      competencyRaw === null || competencyRaw === undefined
+        ? null
+        : String(competencyRaw);
+    const createdAt = String(raw.created_at ?? raw.createdAt ?? "");
+    const payloadValue =
+      raw.payload && typeof raw.payload === "object"
+        ? (raw.payload as Record<string, unknown>)
+        : {};
+    events.push({
+      eventId,
+      createdAt,
+      stage,
+      competency,
+      eventType,
+      payload: payloadValue,
+    });
+  });
+  return events.sort((a, b) => a.eventId - b.eventId);
+};
+
+const normalizeCompetencies = (payload: unknown): SessionCompetencyState[] => {
+  if (!Array.isArray(payload)) {
+    return [];
+  }
+  const states: SessionCompetencyState[] = [];
+  payload.forEach((item) => {
+    if (!item || typeof item !== "object") {
+      return;
+    }
+    const raw = item as Record<string, unknown>;
+    const name = String(raw.competency ?? raw.name ?? "");
+    if (!name) {
+      return;
+    }
+    const criteriaRaw = Array.isArray(raw.criteria) ? raw.criteria : [];
+    const criteria: SessionCriterion[] = criteriaRaw
+      .map((criterionRaw) => {
+        if (!criterionRaw || typeof criterionRaw !== "object") {
+          return null;
+        }
+        const criterion = criterionRaw as Record<string, unknown>;
+        const label = String(criterion.criterion ?? "");
+        if (!label) {
+          return null;
+        }
+        return {
+          criterion: label,
+          weight: Number(criterion.weight ?? 0),
+          latestScore: Number(criterion.latest_score ?? criterion.latestScore ?? 0),
+          rationale: String(criterion.rationale ?? ""),
+        };
+      })
+      .filter((entry): entry is SessionCriterion => Boolean(entry));
+    states.push({
+      competency: name,
+      totalScore: Number(raw.total_score ?? raw.totalScore ?? 0),
+      rubricFilled: Boolean(raw.rubric_filled ?? raw.rubricFilled ?? false),
+      criteria,
+    });
+  });
+  return states;
+};
+
+const normalizeQuestion = (payload: unknown): QuestionPayload | null => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const raw = payload as Record<string, unknown>;
+  const content = String(raw.content ?? raw.question ?? "");
+  if (!content) {
+    return null;
+  }
+  const metaRaw = raw.metadata;
+  const meta =
+    metaRaw && typeof metaRaw === "object"
+      ? (metaRaw as Record<string, unknown>)
+      : {};
+  const stage = normalizeStage(meta.stage);
+  const competencyRaw = meta.competency;
+  const competency =
+    competencyRaw === null || competencyRaw === undefined
+      ? null
+      : String(competencyRaw);
+  const reasoning = String(meta.reasoning ?? "");
+  const escalation = String(meta.escalation ?? "").toLowerCase();
+  const followUp = String(
+    meta.follow_up_prompt ?? meta.followUpPrompt ?? "",
+  );
+  return {
+    content,
+    metadata: {
+      stage,
+      competency,
+      reasoning,
+      escalation: QUESTION_ESCALATIONS.has(escalation)
+        ? escalation
+        : "broad",
+      followUpPrompt: followUp,
+    },
+  };
+};
+
+const normalizeEvaluation = (payload: unknown): EvaluationPayload | null => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const raw = payload as Record<string, unknown>;
+  const summary = String(raw.summary ?? "");
+  const totalScore = Number(raw.total_score ?? raw.totalScore ?? 0);
+  const rubricFilled = Boolean(raw.rubric_filled ?? raw.rubricFilled ?? false);
+  const followUpNeeded = Boolean(
+    raw.follow_up_needed ?? raw.followUpNeeded ?? false,
+  );
+  const hintsRaw = Array.isArray(raw.hints) ? raw.hints : [];
+  const hints = hintsRaw
+    .map((item) => String(item ?? "").trim())
+    .filter((item) => item.length > 0);
+  const criteriaRaw = Array.isArray(raw.criterion_scores)
+    ? raw.criterion_scores
+    : Array.isArray(raw.criterionScores)
+      ? raw.criterionScores
+      : [];
+  const criterionScores: EvaluationCriterionPayload[] = criteriaRaw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const entry = item as Record<string, unknown>;
+      const criterion = String(entry.criterion ?? "");
+      if (!criterion) {
+        return null;
+      }
+      return {
+        criterion,
+        score: Number(entry.score ?? 0),
+        weight: Number(entry.weight ?? 0),
+        rationale: String(entry.rationale ?? ""),
+      };
+    })
+    .filter((entry): entry is EvaluationCriterionPayload => Boolean(entry));
+  return {
+    summary,
+    totalScore,
+    rubricFilled,
+    criterionScores,
+    hints,
+    followUpNeeded,
+  };
+};
+
+const normalizeStartResponse = (payload: unknown): InteractiveSessionStart | null => {
   if (!payload || typeof payload !== "object") {
     return null;
   }
   const data = payload as Record<string, unknown>;
-  const personaRaw = (data.persona ?? {}) as Record<string, unknown>;
-  const persona: PersonaSettings = {
-    name: String(personaRaw.name ?? ""),
-    probingStyle: String(personaRaw.probing_style ?? ""),
-    hintStyle: String(personaRaw.hint_style ?? ""),
-    encouragement: String(personaRaw.encouragement ?? ""),
-  };
-  const profileRaw = (data.profile ?? {}) as Record<string, unknown>;
-  const experiencesRaw = Array.isArray(profileRaw.highlighted_experiences)
-    ? (profileRaw.highlighted_experiences as unknown[])
-    : [];
-  const profile: CandidateProfileSummary = {
-    candidateName: String(profileRaw.candidate_name ?? ""),
-    resumeSummary: String(profileRaw.resume_summary ?? ""),
-    experienceYears: String(profileRaw.experience_years ?? ""),
-    highlightedExperiences: experiencesRaw
-      .map((item) => String(item ?? ""))
-      .filter((entry) => entry.trim().length > 0),
-  };
-  const eventsRaw = Array.isArray(data.events) ? data.events : [];
-  const events: SessionEvent[] = eventsRaw
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return null;
-      }
-      const entry = item as Record<string, unknown>;
-      const eventId = Number(entry.event_id ?? Number.NaN);
-      if (!Number.isFinite(eventId)) {
-        return null;
-      }
-      const stage = String(entry.stage ?? "") as StageLiteral;
-      const type = String(entry.event_type ?? "") as EventType;
-      if (!(["warmup", "competency", "wrapup", "complete"] as const).includes(stage)) {
-        return null;
-      }
-      if (
-        !(
-          [
-            "stage_entered",
-            "question",
-            "answer",
-            "evaluation",
-            "hint",
-            "follow_up",
-            "checkpoint",
-          ] as const
-        ).includes(type)
-      ) {
-        return null;
-      }
-      const payloadValue = entry.payload;
-      const payload =
-        payloadValue && typeof payloadValue === "object"
-          ? (payloadValue as Record<string, unknown>)
-          : {};
-      const competency = entry.competency;
-      return {
-        eventId,
-        createdAt: String(entry.created_at ?? ""),
-        stage,
-        competency: competency === null || competency === undefined ? null : String(competency),
-        eventType: type,
-        payload,
-      } satisfies SessionEvent;
-    })
-    .filter((entry): entry is SessionEvent => Boolean(entry));
-  const competenciesRaw = Array.isArray(data.competencies) ? data.competencies : [];
-  const competencies: SessionCompetencyState[] = competenciesRaw
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return null;
-      }
-      const entry = item as Record<string, unknown>;
-      const competencyName = String(entry.competency ?? "");
-      if (!competencyName) {
-        return null;
-      }
-      const totalScore = Number(entry.total_score ?? 0);
-      const rubricFilled = Boolean(entry.rubric_filled);
-      const criteriaRaw = Array.isArray(entry.criteria) ? entry.criteria : [];
-      const criteria: SessionCriterion[] = criteriaRaw
-        .map((criterionItem) => {
-          if (!criterionItem || typeof criterionItem !== "object") {
-            return null;
-          }
-          const criterion = criterionItem as Record<string, unknown>;
-          const name = String(criterion.criterion ?? "");
-          if (!name) {
-            return null;
-          }
-          return {
-            competency: competencyName,
-            criterion: name,
-            weight: Number(criterion.weight ?? 0),
-            latestScore: Number(criterion.latest_score ?? 0),
-            rationale: String(criterion.rationale ?? ""),
-          } satisfies SessionCriterion;
-        })
-        .filter((entry): entry is SessionCriterion => Boolean(entry));
-      return {
-        competency: competencyName,
-        totalScore: Number.isFinite(totalScore) ? totalScore : 0,
-        rubricFilled,
-        criteria,
-      } satisfies SessionCompetencyState;
-    })
-    .filter((entry): entry is SessionCompetencyState => Boolean(entry));
+  const sessionId = String(data.session_id ?? data.sessionId ?? "");
+  if (!sessionId) {
+    return null;
+  }
   return {
-    persona,
-    profile,
-    events,
-    competencies,
-  } satisfies SessionData;
+    sessionId,
+    stage: normalizeStage(data.stage),
+    persona: normalizePersona(data.persona),
+    profile: normalizeProfile(data.profile),
+    question: normalizeQuestion(data.question),
+    events: normalizeEvents(data.events),
+    competencies: normalizeCompetencies(data.competencies),
+    overallScore: Number(data.overall_score ?? data.overallScore ?? 0),
+    questionsAsked: Number(data.questions_asked ?? data.questionsAsked ?? 0),
+    elapsedMs: Number(data.elapsed_ms ?? data.elapsedMs ?? 0),
+  };
+};
+
+const normalizeTurnResponse = (payload: unknown): InteractiveTurnSnapshot | null => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const data = payload as Record<string, unknown>;
+  return {
+    stage: normalizeStage(data.stage),
+    question: normalizeQuestion(data.question),
+    evaluation: normalizeEvaluation(data.evaluation),
+    events: normalizeEvents(data.events),
+    competencies: normalizeCompetencies(data.competencies),
+    overallScore: Number(data.overall_score ?? data.overallScore ?? 0),
+    questionsAsked: Number(data.questions_asked ?? data.questionsAsked ?? 0),
+    elapsedMs: Number(data.elapsed_ms ?? data.elapsedMs ?? 0),
+    completed: Boolean(data.completed),
+  };
+};
+
+const deriveActiveCompetency = (events: SessionEvent[]): string | null => {
+  let result: string | null = null;
+  events.forEach((event) => {
+    if (event.eventType === "stage_entered") {
+      if (event.stage === "competency" && event.competency) {
+        result = event.competency;
+      } else if (event.stage !== "competency") {
+        result = "—";
+      }
+    } else if (event.eventType === "question" && event.competency) {
+      result = event.competency;
+    }
+  });
+  return result;
+};
+
+const translateEvents = (events: SessionEvent[]): ChatMessage[] => {
+  const messages: ChatMessage[] = [];
+  events.forEach((event) => {
+    if (event.eventType === "stage_entered") {
+      let content = "";
+      if (event.stage === "competency" && event.competency) {
+        content = `Shifting focus to ${event.competency}.`;
+      } else if (event.stage === "wrapup") {
+        content = "Moving into wrap-up.";
+      } else if (event.stage === "warmup") {
+        content = "Beginning warmup.";
+      }
+      if (content) {
+        messages.push({
+          id: generateId(),
+          speaker: "System",
+          content,
+          tone: "neutral",
+        });
+      }
+      return;
+    }
+    if (event.eventType === "question") {
+      const question = String(event.payload.question ?? event.payload.content ?? "").trim();
+      if (question) {
+        messages.push({
+          id: generateId(),
+          speaker: "Interviewer",
+          content: question,
+          tone: "neutral",
+        });
+      }
+      return;
+    }
+    if (event.eventType === "answer") {
+      const answer = String(event.payload.answer ?? "").trim();
+      if (answer) {
+        messages.push({
+          id: generateId(),
+          speaker: "Candidate",
+          content: answer,
+          tone: "positive",
+        });
+      }
+      return;
+    }
+    if (event.eventType === "hint") {
+      const hint = String(event.payload.hint ?? "").trim();
+      if (hint) {
+        messages.push({
+          id: generateId(),
+          speaker: "System",
+          content: `Hint: ${hint}`,
+          tone: "neutral",
+        });
+      }
+      return;
+    }
+    if (event.eventType === "follow_up") {
+      const message = String(
+        event.payload.message ?? "Evaluator suggests a follow-up.",
+      ).trim();
+      messages.push({
+        id: generateId(),
+        speaker: "System",
+        content: message,
+        tone: "neutral",
+      });
+      return;
+    }
+    if (event.eventType === "checkpoint") {
+      const savedAt = String(event.payload.saved_at ?? event.payload.savedAt ?? "");
+      const message = savedAt
+        ? `Checkpoint saved at ${savedAt}.`
+        : "Checkpoint saved.";
+      messages.push({
+        id: generateId(),
+        speaker: "System",
+        content: message,
+        tone: "neutral",
+      });
+      return;
+    }
+    if (event.eventType === "evaluation") {
+      const summary = String(event.payload.summary ?? "").trim();
+      if (summary) {
+        messages.push({
+          id: generateId(),
+          speaker: "System",
+          content: summary,
+          tone: "neutral",
+        });
+      }
+      const hintsRaw = Array.isArray(event.payload.hints)
+        ? event.payload.hints
+        : [];
+      hintsRaw
+        .map((hint) => String(hint ?? "").trim())
+        .filter((hint) => hint.length > 0)
+        .forEach((hint) => {
+          messages.push({
+            id: generateId(),
+            speaker: "System",
+            content: `Coaching hint: ${hint}`,
+            tone: "neutral",
+          });
+        });
+    }
+  });
+  return messages;
 };
 
 export function InterviewSessionPage({
   assignment,
   onBackToDashboard,
+  autoStart = false,
+  onAutoStartConsumed,
 }: InterviewSessionPageProps) {
   const [autoGenerate, setAutoGenerate] = useState(1);
   const [autoSend, setAutoSend] = useState(0);
-  const [sessionData, setSessionData] = useState<SessionData | null>(null);
+  const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [displayedMessages, setDisplayedMessages] = useState<ChatMessage[]>([]);
   const [criterionRows, setCriterionRows] = useState<CriterionRow[]>([]);
@@ -283,26 +638,87 @@ export function InterviewSessionPage({
   const [overallScore, setOverallScore] = useState(0);
   const [status, setStatus] = useState<"idle" | "running" | "paused" | "stopped" | "complete">("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [isFetching, setIsFetching] = useState(false);
-  const [currentEventIndex, setCurrentEventIndex] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [isFetchingStart, setIsFetchingStart] = useState(false);
+  const [isSendingTurn, setIsSendingTurn] = useState(false);
+  const [draftAnswer, setDraftAnswer] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const eventsRef = useRef<SessionEvent[]>([]);
-  const weightMapRef = useRef<Map<string, number>>(new Map());
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
   const competencyOrderRef = useRef<string[]>([]);
-  const timeoutRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
   const elapsedAccumulatorRef = useRef<number>(0);
   const [timerRunning, setTimerRunning] = useState(false);
 
   const timeElapsed = useMemo(() => formatElapsed(elapsedMs), [elapsedMs]);
 
-  const clearPlaybackTimeout = useCallback(() => {
-    if (timeoutRef.current !== null) {
-      window.clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
+  const appendMessages = useCallback((incoming: ChatMessage[]) => {
+    if (incoming.length === 0) {
+      return;
     }
+    setDisplayedMessages((previous) => {
+      const next = [...previous];
+      incoming.forEach((message) => {
+        if (message.speaker === "Candidate") {
+          const index = next.findIndex(
+            (item) =>
+              item.pending &&
+              item.speaker === "Candidate" &&
+              item.content === message.content,
+          );
+          if (index !== -1) {
+            next[index] = { ...message, pending: false };
+            return;
+          }
+          const fallbackIndex = next.findIndex(
+            (item) => item.pending && item.speaker === "Candidate",
+          );
+          if (fallbackIndex !== -1) {
+            next[fallbackIndex] = { ...message, pending: false };
+            return;
+          }
+        }
+        next.push({ ...message, pending: false });
+      });
+      return next;
+    });
   }, []);
+
+  const appendQuestionMessage = useCallback((question: QuestionPayload | null) => {
+    if (!question || !question.content?.trim()) {
+      return;
+    }
+    const content = question.content.trim();
+    setDisplayedMessages((previous) => {
+      const exists = previous.some(
+        (item) => item.speaker === "Interviewer" && item.content === content,
+      );
+      if (exists) {
+        return previous;
+      }
+      return [
+        ...previous,
+        {
+          id: generateId(),
+          speaker: "Interviewer",
+          content,
+          tone: "neutral",
+          pending: false,
+        },
+      ];
+    });
+  }, []);
+
+  const updateElapsed = useCallback(
+    (ms: number) => {
+      const safe = Math.max(0, Math.floor(ms));
+      elapsedAccumulatorRef.current = safe;
+      setElapsedMs(safe);
+      if (timerRunning) {
+        startTimeRef.current = Date.now();
+      }
+    },
+    [timerRunning],
+  );
 
   const beginTimer = useCallback(() => {
     elapsedAccumulatorRef.current = 0;
@@ -310,6 +726,10 @@ export function InterviewSessionPage({
     setElapsedMs(0);
     setTimerRunning(true);
   }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [displayedMessages.length]);
 
   const pauseTimer = useCallback(() => {
     if (!timerRunning) {
@@ -345,293 +765,149 @@ export function InterviewSessionPage({
     };
   }, [timerRunning]);
 
-  useEffect(() => {
-    eventsRef.current = events;
-  }, [events]);
-
-  useEffect(() => {
-    if (!sessionData) {
-      weightMapRef.current.clear();
-      competencyOrderRef.current = [];
-      setCriterionRows([]);
-      setCompetencyScores([]);
-      setOverallScore(0);
-      return;
+  const applyStage = useCallback((stage: StageLiteral) => {
+    setStageName(STAGE_LABELS[stage] ?? STAGE_LABELS.warmup);
+    setStageProgress(STAGE_PROGRESS[stage] ?? 0);
+    if (stage === "wrapup" || stage === "complete" || stage === "warmup") {
+      setActiveCompetency("—");
     }
-    weightMapRef.current.clear();
-    competencyOrderRef.current = sessionData.competencies.map(
-      (entry) => entry.competency,
+  }, []);
+
+const applyCompetencySnapshot = useCallback((snapshot: SessionCompetencyState[]) => {
+    competencyOrderRef.current = snapshot.map((entry) => entry.competency);
+    const order = new Map(
+      competencyOrderRef.current.map((name, index) => [name, index]),
     );
-    const initialRows: CriterionRow[] = [];
-    sessionData.competencies.forEach((competency) => {
+    const rows: CriterionRow[] = [];
+    snapshot.forEach((competency) => {
       competency.criteria.forEach((criterion) => {
         const weightDisplay = Number(toDisplayWeight(criterion.weight).toFixed(1));
-        weightMapRef.current.set(
-          `${competency.competency}::${criterion.criterion}`,
-          weightDisplay,
-        );
-        const latestScore = Number.isFinite(criterion.latestScore)
-          ? criterion.latestScore
-          : 0;
         const rawScore = Number(
-          (latestScore * (weightDisplay / 100)).toFixed(2),
+          (criterion.latestScore * (weightDisplay / 100)).toFixed(2),
         );
-        initialRows.push({
+        rows.push({
           competency: competency.competency,
           criterion: criterion.criterion,
           weight: weightDisplay,
-          achievedLevel: toLevel(latestScore),
+          achievedLevel: toLevel(criterion.latestScore),
           rawScore,
         });
       });
     });
-    setCriterionRows(initialRows);
-    const competencySummaries = sessionData.competencies.map((entry) => ({
+    rows.sort((a, b) => {
+      const indexA = order.get(a.competency) ?? Number.MAX_SAFE_INTEGER;
+      const indexB = order.get(b.competency) ?? Number.MAX_SAFE_INTEGER;
+      if (indexA !== indexB) {
+        return indexA - indexB;
+      }
+      return a.criterion.localeCompare(b.criterion);
+    });
+    setCriterionRows(rows);
+    const summaries = snapshot.map((entry) => ({
       competency: entry.competency,
       score: Number(entry.totalScore.toFixed(1)),
     }));
-    setCompetencyScores(competencySummaries);
-    if (competencySummaries.length > 0) {
-      const aggregate = competencySummaries.reduce(
-        (sum, item) => sum + item.score,
-        0,
-      );
-      setOverallScore(
-        Number((aggregate / competencySummaries.length).toFixed(1)),
-      );
-    } else {
-      setOverallScore(0);
-    }
-  }, [sessionData]);
+    setCompetencyScores(summaries);
+  }, []);
 
-  const processEvent = useCallback(
-    (event: SessionEvent, index: number, total: number) => {
-      if (total > 0) {
-        const progress = Math.min(100, Math.round(((index + 1) / total) * 100));
-        setStageProgress(progress);
-      }
-      setStageName(STAGE_LABELS[event.stage] ?? STAGE_LABELS.warmup);
-      if (event.stage === "competency" && event.competency) {
-        setActiveCompetency(event.competency);
-      }
-      if (event.stage === "wrapup") {
-        setActiveCompetency("—");
-      }
-      const messages: ChatMessage[] = [];
-      if (event.eventType === "stage_entered") {
-        let content = "";
-        if (event.stage === "competency" && event.competency) {
-          content = `Shifting focus to ${event.competency}.`;
-        } else if (event.stage === "wrapup") {
-          content = "Moving into wrap-up.";
-        } else if (event.stage === "warmup") {
-          content = "Beginning warmup.";
+  const applyEvents = useCallback(
+    (incoming: SessionEvent[], options?: { reset?: boolean }) => {
+      if (options?.reset) {
+        const sorted = [...incoming].sort((a, b) => a.eventId - b.eventId);
+        setEvents(sorted);
+        const messages = translateEvents(sorted).map((message) => ({
+          ...message,
+          pending: false,
+        }));
+        setDisplayedMessages(messages);
+        const active = deriveActiveCompetency(sorted);
+        if (active !== null) {
+          setActiveCompetency(active);
         }
-        if (content) {
-          messages.push({
-            id: generateId(),
-            speaker: "System",
-            content,
-            tone: "neutral",
-          });
+        return;
+      }
+      if (incoming.length === 0) {
+        return;
+      }
+      const sorted = [...incoming].sort((a, b) => a.eventId - b.eventId);
+      let appended: SessionEvent[] = [];
+      setEvents((previous) => {
+        const existing = new Set(previous.map((event) => event.eventId));
+        appended = sorted.filter((event) => !existing.has(event.eventId));
+        if (!appended.length) {
+          return previous;
         }
+        return [...previous, ...appended].sort((a, b) => a.eventId - b.eventId);
+      });
+      if (!appended.length) {
+        return;
       }
-      if (event.eventType === "question") {
-        const questionText = String(event.payload.question ?? "").trim();
-        if (questionText) {
-          messages.push({
-            id: generateId(),
-            speaker: "Interviewer",
-            content: questionText,
-            tone: "neutral",
-          });
-          setQuestionsAsked((prev) => prev + 1);
-          if (event.competency) {
-            setActiveCompetency(event.competency);
-          }
-        }
-      }
-      if (event.eventType === "answer") {
-        const answerText = String(event.payload.answer ?? "").trim();
-        if (answerText) {
-          messages.push({
-            id: generateId(),
-            speaker: "Candidate",
-            content: answerText,
-            tone: "positive",
-          });
-        }
-      }
-      if (event.eventType === "hint") {
-        const hintText = String(event.payload.hint ?? "").trim();
-        if (hintText) {
-          messages.push({
-            id: generateId(),
-            speaker: "System",
-            content: `Hint: ${hintText}`,
-            tone: "neutral",
-          });
-        }
-      }
-      if (event.eventType === "follow_up") {
-        const followUpText = String(
-          event.payload.message ?? "Evaluator suggests a follow-up.",
-        ).trim();
-        messages.push({
-          id: generateId(),
-          speaker: "System",
-          content: followUpText,
-          tone: "neutral",
-        });
-      }
-      if (event.eventType === "checkpoint") {
-        const savedAt = String(event.payload.saved_at ?? "");
-        const checkpointMessage = savedAt
-          ? `Checkpoint saved at ${savedAt}.`
-          : "Checkpoint saved.";
-        messages.push({
-          id: generateId(),
-          speaker: "System",
-          content: checkpointMessage,
-          tone: "neutral",
-        });
-      }
-      if (event.eventType === "evaluation" && event.competency) {
-        const evaluation = event.payload;
-        const summary = typeof evaluation.summary === "string" ? evaluation.summary : "";
-        if (summary.trim()) {
-          messages.push({
-            id: generateId(),
-            speaker: "System",
-            content: summary,
-            tone: "neutral",
-          });
-        }
-        const hints = Array.isArray(evaluation.hints)
-          ? (evaluation.hints as unknown[])
-          : [];
-        hints
-          .map((item) => String(item ?? "").trim())
-          .filter((hint) => hint.length > 0)
-          .forEach((hint) => {
-            messages.push({
-              id: generateId(),
-              speaker: "System",
-              content: `Coaching hint: ${hint}`,
-              tone: "neutral",
-            });
-          });
-        const totalScore = Number(evaluation.total_score ?? 0);
-        setCompetencyScores((previous) => {
-          const map = new Map(previous.map((item) => [item.competency, item.score]));
-          map.set(event.competency as string, Number(totalScore.toFixed(1)));
-          const order = competencyOrderRef.current;
-          const ordered = (order.length ? order : Array.from(map.keys())).map((name) => ({
-            competency: name,
-            score: map.get(name) ?? 0,
-          }));
-          if (ordered.length > 0) {
-            const aggregate = ordered.reduce((sum, entry) => sum + entry.score, 0);
-            setOverallScore(Number((aggregate / ordered.length).toFixed(1)));
-          } else {
-            setOverallScore(0);
-          }
-          return ordered;
-        });
-        const criterionScores = Array.isArray(evaluation.criterion_scores)
-          ? (evaluation.criterion_scores as Array<Record<string, unknown>>)
-          : [];
-        if (criterionScores.length > 0) {
-          setCriterionRows((previous) => {
-            const map = new Map(
-              previous.map((row) => [`${row.competency}::${row.criterion}`, row]),
-            );
-            criterionScores.forEach((scoreEntry) => {
-              const criterionName = String(scoreEntry.criterion ?? "").trim();
-              if (!criterionName) {
-                return;
-              }
-              const key = `${event.competency as string}::${criterionName}`;
-              const storedWeight = weightMapRef.current.get(key) ?? 0;
-              const weightDisplay = Number(storedWeight.toFixed(1));
-              const scoreValue = Number(scoreEntry.score ?? 0);
-              const rawScore = Number(
-                (scoreValue * (weightDisplay / 100)).toFixed(2),
-              );
-              map.set(key, {
-                competency: event.competency as string,
-                criterion: criterionName,
-                weight: weightDisplay,
-                achievedLevel: toLevel(scoreValue),
-                rawScore,
-              });
-            });
-            const order = competencyOrderRef.current;
-            const sorted = Array.from(map.values()).sort((a, b) => {
-              const indexA = order.indexOf(a.competency);
-              const indexB = order.indexOf(b.competency);
-              if (indexA !== indexB) {
-                const safeA = indexA === -1 ? Number.MAX_SAFE_INTEGER : indexA;
-                const safeB = indexB === -1 ? Number.MAX_SAFE_INTEGER : indexB;
-                return safeA - safeB;
-              }
-              return a.criterion.localeCompare(b.criterion);
-            });
-            return sorted;
-          });
-        }
-      }
-      if (messages.length > 0) {
-        setDisplayedMessages((previous) => [...previous, ...messages]);
+      const messages = translateEvents(appended);
+      appendMessages(messages);
+      const active = deriveActiveCompetency(appended);
+      if (active !== null) {
+        setActiveCompetency(active);
       }
     },
-    [],
+    [appendMessages],
   );
 
-  useEffect(() => {
-    if (!isPlaying) {
-      clearPlaybackTimeout();
-      return;
-    }
-    if (events.length === 0) {
-      clearPlaybackTimeout();
-      setIsPlaying(false);
-      setStatus("complete");
-      pauseTimer();
-      return;
-    }
-    if (currentEventIndex >= events.length) {
-      clearPlaybackTimeout();
-      setIsPlaying(false);
-      setStatus("complete");
-      setStageProgress(100);
-      setStageName(STAGE_LABELS.complete);
-      pauseTimer();
-      return;
-    }
-    timeoutRef.current = window.setTimeout(() => {
-      const event = events[currentEventIndex];
-      processEvent(event, currentEventIndex, events.length);
-      setCurrentEventIndex((value) => value + 1);
-    }, EVENT_DELAY_MS);
-    return () => {
-      clearPlaybackTimeout();
-    };
-  }, [
-    isPlaying,
-    events,
-    currentEventIndex,
-    processEvent,
-    clearPlaybackTimeout,
-    pauseTimer,
-  ]);
+  const applyStartSnapshot = useCallback(
+    (snapshot: InteractiveSessionStart) => {
+      setSessionMeta({
+        persona: snapshot.persona,
+        profile: snapshot.profile,
+      });
+      setSessionId(snapshot.sessionId);
+      setStatus(snapshot.stage === "complete" ? "complete" : "running");
+      setQuestionsAsked(snapshot.questionsAsked);
+      applyStage(snapshot.stage);
+      applyCompetencySnapshot(snapshot.competencies);
+      setOverallScore(Number(snapshot.overallScore.toFixed(1)));
+      updateElapsed(snapshot.elapsedMs);
+      applyEvents(snapshot.events, { reset: true });
+      appendQuestionMessage(snapshot.question);
+      setErrorMessage(null);
+      setDraftAnswer("");
+      if (snapshot.stage === "complete") {
+        resetTimer();
+        setStatus("complete");
+      } else {
+        resetTimer();
+        beginTimer();
+      }
+    },
+    [appendQuestionMessage, applyCompetencySnapshot, applyEvents, applyStage, beginTimer, resetTimer, updateElapsed],
+  );
+
+  const applyTurnSnapshot = useCallback(
+    (snapshot: InteractiveTurnSnapshot) => {
+      applyStage(snapshot.stage);
+      applyCompetencySnapshot(snapshot.competencies);
+      applyEvents(snapshot.events);
+      appendQuestionMessage(snapshot.question);
+      setQuestionsAsked(snapshot.questionsAsked);
+      setOverallScore(Number(snapshot.overallScore.toFixed(1)));
+      updateElapsed(snapshot.elapsedMs);
+      if (snapshot.completed || snapshot.stage === "complete") {
+        setStatus("complete");
+        pauseTimer();
+        setActiveCompetency("—");
+      } else if (status !== "paused") {
+        setStatus("running");
+      }
+    },
+    [appendQuestionMessage, applyCompetencySnapshot, applyEvents, applyStage, pauseTimer, status, updateElapsed],
+  );
 
   const startSession = useCallback(async () => {
-    clearPlaybackTimeout();
-    setIsFetching(true);
+    if (isFetchingStart || status === "running") {
+      return;
+    }
+    setIsFetchingStart(true);
     setErrorMessage(null);
     try {
-      const response = await fetch("/api/interview-sessions/run", {
+      const response = await fetch("/api/interview-sessions/start", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -646,101 +922,147 @@ export function InterviewSessionPage({
         const detail =
           errorPayload && typeof errorPayload.detail === "string"
             ? errorPayload.detail
-            : "Failed to run interview session.";
+            : "Failed to start interview session.";
         throw new Error(detail);
       }
       const payload = await response.json();
-      const normalized = normalizeSessionResponse(payload);
+      const normalized = normalizeStartResponse(payload);
       if (!normalized) {
         throw new Error("Invalid session response.");
       }
-      const introMessages: ChatMessage[] = [
-        {
-          id: generateId(),
-          speaker: "System",
-          content: `Interview persona: ${normalized.persona.name}. ${normalized.persona.probingStyle}`,
-          tone: "neutral",
-        },
-      ];
-      if (normalized.profile.resumeSummary) {
-        const summary = normalized.profile.resumeSummary.length > 200
-          ? `${normalized.profile.resumeSummary.slice(0, 197)}…`
-          : normalized.profile.resumeSummary;
-        introMessages.push({
-          id: generateId(),
-          speaker: "System",
-          content: `Resume context: ${summary}`,
-          tone: "neutral",
-        });
-      }
-      setSessionData(normalized);
-      setEvents(normalized.events);
-      setDisplayedMessages(introMessages);
-      setStageProgress(0);
-      setStageName(STAGE_LABELS.warmup);
-      setActiveCompetency("—");
-      setQuestionsAsked(0);
-      setOverallScore(0);
-      setCurrentEventIndex(0);
-      setStatus("running");
-      setIsPlaying(true);
-      beginTimer();
+      applyStartSnapshot(normalized);
     } catch (error) {
       const message =
         error instanceof Error
           ? error.message
-          : "Failed to run interview session.";
+          : "Failed to start interview session.";
       setErrorMessage(message);
-      setStatus("idle");
-      setSessionData(null);
+      setSessionMeta(null);
+      setSessionId(null);
       setEvents([]);
       setDisplayedMessages([]);
+      setCriterionRows([]);
+      setCompetencyScores([]);
       setStageProgress(0);
       setStageName(STAGE_LABELS.warmup);
       setActiveCompetency("—");
       setQuestionsAsked(0);
       setOverallScore(0);
-      setCurrentEventIndex(0);
+      setStatus("idle");
       resetTimer();
     } finally {
-      setIsFetching(false);
+      setIsFetchingStart(false);
     }
   }, [
+    applyStartSnapshot,
     assignment.candidateId,
     assignment.interviewId,
-    beginTimer,
-    clearPlaybackTimeout,
+    isFetchingStart,
     resetTimer,
+    status,
   ]);
+
+  const submitTurn = useCallback(async (answerText: string) => {
+    const currentSessionId = sessionId;
+    if (!currentSessionId || !answerText) {
+      return;
+    }
+    setIsSendingTurn(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch("/api/interview-sessions/turn", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session_id: currentSessionId,
+          answer: answerText,
+          auto_send: Boolean(autoSend),
+          auto_generate: Boolean(autoGenerate),
+        }),
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === "string"
+            ? errorPayload.detail
+            : "Failed to process answer.";
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      const normalized = normalizeTurnResponse(payload);
+      if (!normalized) {
+        throw new Error("Invalid turn response.");
+      }
+      applyTurnSnapshot(normalized);
+      setDisplayedMessages((previous) =>
+        previous.map((item) =>
+          item.pending &&
+          item.speaker === "Candidate" &&
+          item.content === answerText
+            ? { ...item, pending: false }
+            : item,
+        ),
+      );
+      setDraftAnswer("");
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to process answer.";
+      setErrorMessage(message);
+      setDisplayedMessages((previous) => {
+        const next = [...previous];
+        const index = next.findIndex(
+          (item) =>
+            item.pending &&
+            item.speaker === "Candidate" &&
+            item.content === answerText,
+        );
+        if (index !== -1) {
+          next.splice(index, 1);
+        }
+        return next;
+      });
+      setDraftAnswer(answerText);
+    } finally {
+      setIsSendingTurn(false);
+    }
+  }, [applyTurnSnapshot, autoGenerate, autoSend, sessionId]);
+
+  useEffect(() => {
+    if (!autoStart) {
+      return;
+    }
+    if (status !== "idle" || isFetchingStart) {
+      return;
+    }
+    void startSession();
+    onAutoStartConsumed?.();
+  }, [autoStart, isFetchingStart, onAutoStartConsumed, startSession, status]);
 
   const handleStart = useCallback(() => {
     if (status === "paused") {
       setStatus("running");
-      setIsPlaying(true);
       resumeTimer();
       return;
     }
-    if (status === "running" || isFetching) {
+    if (status === "running" || isFetchingStart) {
       return;
     }
     void startSession();
-  }, [status, isFetching, startSession, resumeTimer]);
+  }, [isFetchingStart, resumeTimer, startSession, status]);
 
   const handlePause = useCallback(() => {
     if (status !== "running") {
       return;
     }
-    clearPlaybackTimeout();
-    setIsPlaying(false);
-    setStatus("paused");
     pauseTimer();
-  }, [status, clearPlaybackTimeout, pauseTimer]);
+    setStatus("paused");
+  }, [pauseTimer, status]);
 
   const handleStop = useCallback(() => {
-    clearPlaybackTimeout();
-    setIsPlaying(false);
-    setStatus("stopped");
-    setSessionData(null);
+    setSessionMeta(null);
+    setSessionId(null);
     setEvents([]);
     setDisplayedMessages([]);
     setCriterionRows([]);
@@ -750,35 +1072,41 @@ export function InterviewSessionPage({
     setActiveCompetency("—");
     setQuestionsAsked(0);
     setOverallScore(0);
-    setCurrentEventIndex(0);
+    setStatus("stopped");
     setErrorMessage(null);
+    setDraftAnswer("");
     resetTimer();
-  }, [clearPlaybackTimeout, resetTimer]);
+  }, [resetTimer]);
 
+  const handleSend = useCallback(() => {
+    const answer = draftAnswer.trim();
+    if (!sessionId || !answer || isSendingTurn) {
+      return;
+    }
+    const pendingMessage: ChatMessage = {
+      id: generateId(),
+      speaker: "Candidate",
+      content: answer,
+      tone: "positive",
+      pending: true,
+    };
+    setDisplayedMessages((previous) => [...previous, pendingMessage]);
+    setDraftAnswer("");
+    void submitTurn(answer);
+  }, [draftAnswer, isSendingTurn, sessionId, submitTurn]);
+
+  const isPreparingSession = isFetchingStart && status === "idle";
+  const stageDisplayName = isPreparingSession ? "Preparing session…" : stageName;
   const startButtonLabel = status === "paused" ? "Resume" : "Start";
-  const startButtonText = isFetching ? "Starting..." : startButtonLabel;
-  const isStartDisabled = isFetching || status === "running";
+  const startButtonText = isFetchingStart ? "Starting..." : startButtonLabel;
+  const isStartDisabled = isFetchingStart || status === "running";
   const isPauseDisabled = status !== "running";
   const isStopDisabled = status === "idle";
-
-  const renderLevelBadges = (achieved: CriterionRow["achievedLevel"]) => {
-    return (
-      <div className="flex flex-wrap gap-1">
-        {[1, 2, 3, 4, 5].map((level) => {
-          const isActive = level === achieved;
-          return (
-            <Badge
-              key={level}
-              variant={isActive ? "default" : "outline"}
-              className="px-2 py-0 text-xs"
-            >
-              Level {level}
-            </Badge>
-          );
-        })}
-      </div>
-    );
-  };
+  const isSendDisabled =
+    !sessionId ||
+    status !== "running" ||
+    isSendingTurn ||
+    draftAnswer.trim().length === 0;
 
   return (
     <div className="min-h-screen bg-slate-50 p-6">
@@ -806,9 +1134,9 @@ export function InterviewSessionPage({
             <div className="font-mono text-xs text-muted-foreground">
               {assignment.interviewId}
             </div>
-            {sessionData && (
+            {sessionMeta && (
               <div className="pt-1 text-xs text-slate-500">
-                Persona: {sessionData.persona.name}
+                Persona: {sessionMeta.persona.name}
               </div>
             )}
           </div>
@@ -832,32 +1160,48 @@ export function InterviewSessionPage({
               <ScrollArea className="h-[25rem] pr-4">
                 <div className="flex flex-col gap-4">
                   {displayedMessages.length > 0 ? (
-                    displayedMessages.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`rounded-lg border p-3 text-sm leading-relaxed ${
+                    <>
+                      {displayedMessages.map((message) => {
+                        const baseClass =
                           message.speaker === "Candidate"
                             ? "border-emerald-200 bg-emerald-50 text-emerald-900"
                             : message.speaker === "Interviewer"
                               ? "border-sky-200 bg-sky-50 text-sky-900"
-                              : "border-slate-200 bg-slate-50 text-slate-700"
-                        }`}
-                      >
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                          <span className="font-medium">{message.speaker}</span>
-                          <Badge
-                            variant={
-                              message.tone === "positive"
-                                ? "secondary"
-                                : "outline"
-                            }
+                              : "border-slate-200 bg-slate-50 text-slate-700";
+                        const pendingClass = message.pending ? "opacity-70" : "";
+                        return (
+                          <div
+                            key={message.id}
+                            className={`rounded-lg border p-3 text-sm leading-relaxed ${baseClass} ${pendingClass}`}
                           >
-                            {message.tone}
-                          </Badge>
-                        </div>
-                        <p>{message.content}</p>
-                      </div>
-                    ))
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <span className="font-medium">{message.speaker}</span>
+                              {message.pending ? (
+                                <Badge variant="outline" className="flex items-center gap-1">
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                  Sending…
+                                </Badge>
+                              ) : (
+                                <Badge
+                                  variant={
+                                    message.tone === "positive" ? "secondary" : "outline"
+                                  }
+                                >
+                                  {message.tone}
+                                </Badge>
+                              )}
+                            </div>
+                            <p>{message.content}</p>
+                          </div>
+                        );
+                      })}
+                      <div ref={messagesEndRef} />
+                    </>
+                  ) : isPreparingSession ? (
+                    <div className="rounded-md border border-dashed border-sky-200 bg-sky-50 p-6 text-center text-sm text-sky-700">
+                      Preparing the simulated interview… this may take up to a minute
+                      while the AI generates the session.
+                    </div>
                   ) : (
                     <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 p-6 text-center text-sm text-muted-foreground">
                       Session idle — press Start to launch the interview.
@@ -872,14 +1216,19 @@ export function InterviewSessionPage({
                 placeholder="Draft prompts, capture coaching notes, or summarize key evidence..."
                 className="flex-1"
                 rows={4}
+                value={draftAnswer}
+                onChange={(event) => setDraftAnswer(event.target.value)}
+                disabled={!sessionId || status === "complete"}
               />
               <Button
                 type="button"
                 className="lg:h-full lg:min-w-[9rem]"
                 variant="secondary"
+                onClick={handleSend}
+                disabled={isSendDisabled}
               >
                 <Send className="h-4 w-4" />
-                Send
+                {isSendingTurn ? "Sending..." : "Send"}
               </Button>
             </div>
 
@@ -969,7 +1318,7 @@ export function InterviewSessionPage({
               {[
                 {
                   label: "Stage",
-                  value: stageName,
+                  value: stageDisplayName,
                 },
                 {
                   label: "Competency",
@@ -1019,7 +1368,7 @@ export function InterviewSessionPage({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {criteriaRows.map((row) => (
+                {criterionRows.map((row) => (
                   <TableRow key={`${row.competency}-${row.criterion}`}>
                     <TableCell className="font-medium">
                       {row.competency}
@@ -1027,9 +1376,22 @@ export function InterviewSessionPage({
                     <TableCell className="text-sm text-muted-foreground">
                       {row.criterion}
                     </TableCell>
-                    <TableCell>{row.weight}%</TableCell>
+                    <TableCell>{row.weight.toFixed(1)}%</TableCell>
                     <TableCell>
-                      {renderLevelBadges(row.achievedLevel)}
+                      <div className="flex flex-wrap gap-1">
+                        {[1, 2, 3, 4, 5].map((level) => {
+                          const isActive = level === row.achievedLevel;
+                          return (
+                            <Badge
+                              key={`${row.competency}-${row.criterion}-level-${level}`}
+                              variant={isActive ? "default" : "outline"}
+                              className="px-2 py-0 text-xs"
+                            >
+                              Level {level}
+                            </Badge>
+                          );
+                        })}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right font-semibold">
                       {row.rawScore.toFixed(1)}
@@ -1085,9 +1447,9 @@ export function InterviewSessionPage({
                 <p className="text-xs uppercase text-muted-foreground">
                   Current overall
                 </p>
-                  <p className="text-5xl font-semibold text-slate-900">
-                    {overallScore.toFixed(1)}
-                  </p>
+                <p className="text-5xl font-semibold text-slate-900">
+                  {overallScore.toFixed(1)}
+                </p>
               </div>
               <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">
                 Scores update dynamically as evidence is captured. Use this

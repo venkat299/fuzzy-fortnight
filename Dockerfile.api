@@ -17,6 +17,8 @@ COPY api_server.py config.py app_config.json candidate_management.py ./
 COPY jd_analysis ./jd_analysis
 COPY llm_gateway ./llm_gateway
 COPY rubric_design ./rubric_design
+COPY interview_session ./interview_session
+COPY interview_evaluation ./interview_evaluation
 
 EXPOSE 8000
 
