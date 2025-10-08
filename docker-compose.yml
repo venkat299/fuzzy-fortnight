@@ -11,6 +11,8 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       - "5001:8000"
+    volumes:
+      - ./data:/app/data
   ui:
     build:
       context: ./ui

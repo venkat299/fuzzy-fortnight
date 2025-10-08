@@ -1,20 +1,26 @@
-import React, { useMemo, useState } from 'react';
-import { ArrowLeft, Check, LayoutDashboard, Upload, X } from 'lucide-react';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
-import { Button } from './ui/button';
-import { Input } from './ui/input';
-import { Label } from './ui/label';
-import { Textarea } from './ui/textarea';
-import { Badge } from './ui/badge';
+import React, { useEffect, useMemo, useState } from "react";
+import { ArrowLeft, Check, LayoutDashboard, Upload, X } from "lucide-react";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "./ui/card";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { Label } from "./ui/label";
+import { Textarea } from "./ui/textarea";
+import { Badge } from "./ui/badge";
 import {
   Command,
   CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
-  CommandList
-} from './ui/command';
-import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
+  CommandList,
+} from "./ui/command";
+import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 
 interface InterviewOption {
   interviewId: string;
@@ -34,6 +40,8 @@ interface AddCandidatePageProps {
   onBackToDashboard: () => void;
   isSaving: boolean;
   errorMessage: string | null;
+  initialCandidate?: AddCandidateFormData | null;
+  mode?: "create" | "edit";
 }
 
 export function AddCandidatePage({
@@ -41,30 +49,45 @@ export function AddCandidatePage({
   onSave,
   onBackToDashboard,
   isSaving,
-  errorMessage
+  errorMessage,
+  initialCandidate = null,
+  mode = "create",
 }: AddCandidatePageProps) {
-  const [fullName, setFullName] = useState('');
-  const [resume, setResume] = useState('');
+  const [fullName, setFullName] = useState(initialCandidate?.fullName ?? "");
+  const [resume, setResume] = useState(initialCandidate?.resume ?? "");
   const [resumeFileName, setResumeFileName] = useState<string | null>(null);
-  const [selectedInterviewIds, setSelectedInterviewIds] = useState<string[]>([]);
+  const [selectedInterviewIds, setSelectedInterviewIds] = useState<string[]>(
+    initialCandidate?.interviewIds ?? [],
+  );
   const [isPopoverOpen, setIsPopoverOpen] = useState(false);
+
+  useEffect(() => {
+    setFullName(initialCandidate?.fullName ?? "");
+    setResume(initialCandidate?.resume ?? "");
+    setSelectedInterviewIds(initialCandidate?.interviewIds ?? []);
+    setResumeFileName(null);
+  }, [initialCandidate]);
+
+  const isEditMode = mode === "edit";
 
   const interviewOptions = useMemo(
     () =>
       interviews.map((item) => ({
         value: item.interviewId,
-        label: `${item.jobTitle || 'Untitled role'} (${item.interviewId})`,
-        description: item.jobDescription
+        label: `${item.jobTitle || "Untitled role"} (${item.interviewId})`,
+        description: item.jobDescription,
       })),
-    [interviews]
+    [interviews],
   );
 
   const selectedOptions = useMemo(
     () =>
       selectedInterviewIds
         .map((id) => interviewOptions.find((option) => option.value === id))
-        .filter((option): option is typeof interviewOptions[number] => Boolean(option)),
-    [selectedInterviewIds, interviewOptions]
+        .filter((option): option is (typeof interviewOptions)[number] =>
+          Boolean(option),
+        ),
+    [selectedInterviewIds, interviewOptions],
   );
 
   const toggleInterview = (id: string) => {
@@ -88,7 +111,7 @@ export function AddCandidatePage({
     const reader = new FileReader();
     reader.onload = (loadEvent) => {
       const content = loadEvent.target?.result;
-      if (typeof content === 'string') {
+      if (typeof content === "string") {
         setResume(content);
         setResumeFileName(file.name);
       }
@@ -101,7 +124,7 @@ export function AddCandidatePage({
     await onSave({
       fullName: fullName.trim(),
       resume: resume.trim(),
-      interviewIds: selectedInterviewIds
+      interviewIds: selectedInterviewIds,
     });
   };
 
@@ -129,9 +152,13 @@ export function AddCandidatePage({
 
         <Card>
           <CardHeader>
-            <CardTitle>Add candidate</CardTitle>
+            <CardTitle>
+              {isEditMode ? "Edit candidate" : "Add candidate"}
+            </CardTitle>
             <CardDescription>
-              Upload resume details, capture candidate information, and link to relevant interviews.
+              {isEditMode
+                ? "Update candidate information, adjust resume notes, and refine interview assignments."
+                : "Upload resume details, capture candidate information, and link to relevant interviews."}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -167,7 +194,9 @@ export function AddCandidatePage({
                     Upload resume file
                   </Label>
                   {resumeFileName && (
-                    <span className="text-sm text-muted-foreground">Loaded: {resumeFileName}</span>
+                    <span className="text-sm text-muted-foreground">
+                      Loaded: {resumeFileName}
+                    </span>
                   )}
                 </div>
                 <Textarea
@@ -185,8 +214,9 @@ export function AddCandidatePage({
                 <div>
                   <Label>Link to interview job descriptions</Label>
                   <p className="text-xs text-muted-foreground">
-                    Select one or more interviews to associate this candidate with the appropriate job descriptions.
-                    The first selection will be assigned on save.
+                    Select one or more interviews to associate this candidate
+                    with the appropriate job descriptions. The first selection
+                    will be assigned on save.
                   </p>
                 </div>
 
@@ -201,29 +231,38 @@ export function AddCandidatePage({
                       disabled={isSaving || interviewOptions.length === 0}
                     >
                       {selectedOptions.length > 0
-                        ? `${selectedOptions.length} interview${selectedOptions.length > 1 ? 's' : ''} selected`
+                        ? `${selectedOptions.length} interview${selectedOptions.length > 1 ? "s" : ""} selected`
                         : interviewOptions.length > 0
-                          ? 'Search interviews to link'
-                          : 'No interviews available'}
+                          ? "Search interviews to link"
+                          : "No interviews available"}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent align="start" className="w-[min(28rem,90vw)] p-0">
+                  <PopoverContent
+                    align="start"
+                    className="w-[min(28rem,90vw)] p-0"
+                  >
                     <Command>
                       <CommandInput placeholder="Search job titles or IDs..." />
                       <CommandEmpty>No interviews found.</CommandEmpty>
                       <CommandList>
                         <CommandGroup>
                           {interviewOptions.map((option) => {
-                            const isSelected = selectedInterviewIds.includes(option.value);
+                            const isSelected = selectedInterviewIds.includes(
+                              option.value,
+                            );
                             return (
                               <CommandItem
                                 key={option.value}
                                 value={`${option.label} ${option.value}`}
                                 onSelect={() => toggleInterview(option.value)}
                               >
-                                <Check className={`h-4 w-4 ${isSelected ? 'opacity-100' : 'opacity-0'}`} />
+                                <Check
+                                  className={`h-4 w-4 ${isSelected ? "opacity-100" : "opacity-0"}`}
+                                />
                                 <div className="flex flex-col text-left">
-                                  <span className="font-medium">{option.label}</span>
+                                  <span className="font-medium">
+                                    {option.label}
+                                  </span>
                                   {option.description && (
                                     <span className="text-xs text-muted-foreground line-clamp-2">
                                       {option.description}
@@ -242,7 +281,11 @@ export function AddCandidatePage({
                 {selectedOptions.length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {selectedOptions.map((option) => (
-                      <Badge key={option.value} variant="secondary" className="flex items-center gap-2">
+                      <Badge
+                        key={option.value}
+                        variant="secondary"
+                        className="flex items-center gap-2"
+                      >
                         {option.label}
                         <button
                           type="button"
@@ -260,19 +303,30 @@ export function AddCandidatePage({
 
                 {primaryInterview ? (
                   <p className="text-xs text-muted-foreground">
-                    Primary interview assignment:{' '}
-                    <span className="font-medium text-foreground">{primaryInterview.label}</span>
+                    Primary interview assignment:{" "}
+                    <span className="font-medium text-foreground">
+                      {primaryInterview.label}
+                    </span>
                   </p>
                 ) : (
-                  <p className="text-xs text-muted-foreground">Candidate will remain unassigned until an interview is selected.</p>
+                  <p className="text-xs text-muted-foreground">
+                    Candidate will remain unassigned until an interview is
+                    selected.
+                  </p>
                 )}
               </div>
 
-              {errorMessage && <p className="text-sm text-red-600">{errorMessage}</p>}
+              {errorMessage && (
+                <p className="text-sm text-red-600">{errorMessage}</p>
+              )}
 
               <div className="flex justify-end">
                 <Button type="submit" disabled={isSaving}>
-                  {isSaving ? 'Saving…' : 'Save candidate'}
+                  {isSaving
+                    ? "Saving…"
+                    : isEditMode
+                      ? "Update candidate"
+                      : "Save candidate"}
                 </Button>
               </div>
             </form>

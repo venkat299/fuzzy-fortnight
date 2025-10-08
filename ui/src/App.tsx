@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { InterviewerDashboard } from './components/InterviewerDashboard';
 import { CompetencyPillars } from './components/CompetencyPillars';
 import { InterviewRubric } from './components/InterviewRubric';
-import { InterviewerOverview } from './components/InterviewerOverview';
+import { InterviewerOverview, type InterviewAssignment } from './components/InterviewerOverview';
 import { AddCandidateFormData, AddCandidatePage } from './components/AddCandidatePage';
+import { InterviewSessionPage } from './components/InterviewSessionPage';
 
 interface InterviewData {
   jobTitle: string;
@@ -74,7 +75,9 @@ type AppState =
   | 'interviewer-overview'
   | 'interviewer-dashboard'
   | 'candidate-intake'
+  | 'candidate-edit'
   | 'competency-pillars'
+  | 'interview-session'
   | 'interview-rubric';
 
 const DEFAULT_CANDIDATE_STATUS = 'Applied';
@@ -95,6 +98,8 @@ export default function App() {
   const [candidatesError, setCandidatesError] = useState<string | null>(null);
   const [candidateFormError, setCandidateFormError] = useState<string | null>(null);
   const [isCandidateSubmitting, setIsCandidateSubmitting] = useState(false);
+  const [currentSession, setCurrentSession] = useState<InterviewAssignment | null>(null);
+  const [candidateToEdit, setCandidateToEdit] = useState<DashboardCandidate | null>(null);
 
   const normalizeMatrix = (payload: unknown, fallback: InterviewData): CompetencyMatrix => {
     if (!payload || typeof payload !== 'object') {
@@ -409,6 +414,59 @@ export default function App() {
     }
   };
 
+  const handleEditCandidate = (candidateId: string) => {
+    const target = candidates.find((candidate) => candidate.candidateId === candidateId) ?? null;
+    setCandidateFormError(null);
+    if (!target) {
+      setCandidateFormError('Candidate not found.');
+      return;
+    }
+    setCandidateToEdit(target);
+    setCurrentState('candidate-edit');
+  };
+
+  const handleUpdateCandidate = async (data: AddCandidateFormData) => {
+    if (!candidateToEdit) {
+      return;
+    }
+    setCandidateFormError(null);
+    setIsCandidateSubmitting(true);
+    try {
+      setCandidates((previous) =>
+        previous.map((entry) =>
+          entry.candidateId === candidateToEdit.candidateId
+            ? {
+                ...entry,
+                fullName: data.fullName,
+                resume: data.resume,
+                interviewId: data.interviewIds[0] ?? null
+              }
+            : entry
+        )
+      );
+      setCandidateToEdit(null);
+      setCurrentState('interviewer-overview');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to update candidate.';
+      setCandidateFormError(message);
+    } finally {
+      setIsCandidateSubmitting(false);
+    }
+  };
+
+  const launchInterviewFromDashboard = (assignment: InterviewAssignment) => {
+    setCandidateFormError(null);
+    setErrorMessage(null);
+    setIsProceeding(false);
+    setCurrentSession(assignment);
+    setCurrentState('interview-session');
+  };
+
+  const closeInterviewSession = () => {
+    setCurrentSession(null);
+    setCurrentState('interviewer-overview');
+  };
+
   const dashboardInitialData = useMemo(() => interviewData ?? undefined, [interviewData]);
 
   switch (currentState) {
@@ -423,12 +481,21 @@ export default function App() {
           }}
           onAddCandidate={() => {
             setCandidateFormError(null);
+            setCandidateToEdit(null);
             setCurrentState('candidate-intake');
           }}
+          onStartInterview={launchInterviewFromDashboard}
+          onRedoInterview={launchInterviewFromDashboard}
+          onViewRubric={(interviewId) => {
+            setCandidateFormError(null);
+            void handleStartInterview(interviewId);
+          }}
+          onEditCandidate={handleEditCandidate}
           isLoadingInterviews={isLoadingInterviews}
           isLoadingCandidates={isLoadingCandidates}
           interviewsError={interviewsError}
           candidatesError={candidatesError}
+          isProcessingInterview={isProceeding}
         />
       );
 
@@ -457,10 +524,42 @@ export default function App() {
           onSave={handleCreateCandidate}
           onBackToDashboard={() => {
             setCandidateFormError(null);
+            setCandidateToEdit(null);
             setCurrentState('interviewer-overview');
           }}
           isSaving={isCandidateSubmitting}
           errorMessage={candidateFormError}
+          initialCandidate={null}
+          mode="create"
+        />
+      );
+
+    case 'candidate-edit':
+      if (!candidateToEdit) {
+        setCurrentState('interviewer-overview');
+        return null;
+      }
+      return (
+        <AddCandidatePage
+          interviews={interviews.map((item) => ({
+            interviewId: item.interviewId,
+            jobTitle: item.jobTitle,
+            jobDescription: item.jobDescription
+          }))}
+          onSave={handleUpdateCandidate}
+          onBackToDashboard={() => {
+            setCandidateFormError(null);
+            setCandidateToEdit(null);
+            setCurrentState('interviewer-overview');
+          }}
+          isSaving={isCandidateSubmitting}
+          errorMessage={candidateFormError}
+          initialCandidate={{
+            fullName: candidateToEdit.fullName,
+            resume: candidateToEdit.resume,
+            interviewIds: candidateToEdit.interviewId ? [candidateToEdit.interviewId] : []
+          }}
+          mode="edit"
         />
       );
 
@@ -476,6 +575,17 @@ export default function App() {
           onStartInterview={handleStartInterview}
           isProceeding={isProceeding}
           errorMessage={errorMessage}
+        />
+      );
+
+    case 'interview-session':
+      if (!currentSession) {
+        return null;
+      }
+      return (
+        <InterviewSessionPage
+          assignment={currentSession}
+          onBackToDashboard={closeInterviewSession}
         />
       );
 
@@ -509,12 +619,21 @@ export default function App() {
           }}
           onAddCandidate={() => {
             setCandidateFormError(null);
+            setCandidateToEdit(null);
             setCurrentState('candidate-intake');
           }}
+          onStartInterview={launchInterviewFromDashboard}
+          onRedoInterview={launchInterviewFromDashboard}
+          onViewRubric={(interviewId) => {
+            setCandidateFormError(null);
+            void handleStartInterview(interviewId);
+          }}
+          onEditCandidate={handleEditCandidate}
           isLoadingInterviews={isLoadingInterviews}
           isLoadingCandidates={isLoadingCandidates}
           interviewsError={interviewsError}
           candidatesError={candidatesError}
+          isProcessingInterview={isProceeding}
         />
       );
   }
