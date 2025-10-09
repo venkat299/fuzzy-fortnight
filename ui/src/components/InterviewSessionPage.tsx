@@ -1,5 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { ArrowLeft, Pause, Play, Send, Square } from "lucide-react";
+import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
+import { Textarea } from "./ui/textarea";
+import { Switch } from "./ui/switch";
 import {
   Card,
   CardContent,
@@ -7,10 +11,6 @@ import {
   CardHeader,
   CardTitle,
 } from "./ui/card";
-import { Button } from "./ui/button";
-import { Badge } from "./ui/badge";
-import { Textarea } from "./ui/textarea";
-import { Label } from "./ui/label";
 import { Progress } from "./ui/progress";
 import {
   Table,
@@ -20,8 +20,6 @@ import {
   TableHeader,
   TableRow,
 } from "./ui/table";
-import { ScrollArea } from "./ui/scroll-area";
-import { Slider } from "./ui/slider";
 import type { InterviewAssignment } from "./InterviewerOverview";
 
 interface InterviewSessionPageProps {
@@ -29,11 +27,15 @@ interface InterviewSessionPageProps {
   onBackToDashboard: () => void;
 }
 
-interface ChatMessage {
+type MessageType = "system" | "interviewer" | "candidate";
+
+type MessageSentiment = "neutral" | "positive" | "negative";
+
+interface Message {
   id: string;
-  speaker: "Candidate" | "Interviewer" | "System";
+  type: MessageType;
   content: string;
-  tone: "neutral" | "positive";
+  sentiment: MessageSentiment;
 }
 
 interface CriterionRow {
@@ -53,40 +55,33 @@ export function InterviewSessionPage({
   assignment,
   onBackToDashboard,
 }: InterviewSessionPageProps) {
-  const [autoGenerate, setAutoGenerate] = useState(1);
-  const [autoSend, setAutoSend] = useState(0);
-
-  const chatMessages = useMemo<ChatMessage[]>(() => {
-    return [
-      {
-        id: "1",
-        speaker: "System",
-        content:
-          "Interview session initialized. Provide a warm introduction and outline the interview structure.",
-        tone: "neutral",
-      },
-      {
-        id: "2",
-        speaker: "Interviewer",
-        content: `Hi ${assignment.candidateName}, thanks for joining today. We will walk through a few scenario questions to understand your approach to ${assignment.jobTitle.toLowerCase()}.`,
-        tone: "positive",
-      },
-      {
-        id: "3",
-        speaker: "Candidate",
-        content:
-          "Excited to be here! Looking forward to discussing my experience and learning more about the role.",
-        tone: "positive",
-      },
-      {
-        id: "4",
-        speaker: "Interviewer",
-        content:
-          "Great. Let’s start with a situation where you owned a data project from end to end. How did you align the team on the success criteria?",
-        tone: "neutral",
-      },
-    ];
-  }, [assignment.candidateName, assignment.jobTitle]);
+  const [messages, setMessages] = useState<Message[]>(() => [
+    {
+      id: "1",
+      type: "system",
+      content: "Beginning warmup.",
+      sentiment: "neutral",
+    },
+    {
+      id: "2",
+      type: "interviewer",
+      content:
+        "I'm really excited to hear about your work with data pipelines and system optimization—how did you and your team decide what problems were worth solving through automation, and what made a difference in the end?",
+      sentiment: "neutral",
+    },
+    {
+      id: "3",
+      type: "candidate",
+      content:
+        "Great question! We started by analyzing our most time-consuming manual processes and identified three key areas: data validation, report generation, and system monitoring. The breakthrough came when we automated the validation pipeline, which reduced processing time by 60%.",
+      sentiment: "positive",
+    },
+  ]);
+  const [inputValue, setInputValue] = useState("");
+  const [isStarted, setIsStarted] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [autoGenerate, setAutoGenerate] = useState(true);
+  const [autoSend, setAutoSend] = useState(false);
 
   const criteriaRows = useMemo<CriterionRow[]>(() => {
     return [
@@ -147,6 +142,47 @@ export function InterviewSessionPage({
   const timeElapsed = "08:14";
   const overallScore = 67;
 
+  const resolveSpeakerLabel = (type: MessageType) => {
+    switch (type) {
+      case "candidate":
+        return "Candidate";
+      case "interviewer":
+        return "Interviewer";
+      default:
+        return "System";
+    }
+  };
+
+  const handleSend = () => {
+    if (!inputValue.trim()) {
+      return;
+    }
+
+    const newMessage: Message = {
+      id: Date.now().toString(),
+      type: "interviewer",
+      content: inputValue,
+      sentiment: "neutral",
+    };
+
+    setMessages((previous) => [...previous, newMessage]);
+    setInputValue("");
+  };
+
+  const handleStart = () => {
+    setIsStarted(true);
+    setIsPaused(false);
+  };
+
+  const handlePause = () => {
+    setIsPaused(true);
+  };
+
+  const handleStop = () => {
+    setIsStarted(false);
+    setIsPaused(false);
+  };
+
   const renderLevelBadges = (achieved: CriterionRow["achievedLevel"]) => {
     return (
       <div className="flex flex-wrap gap-1">
@@ -166,10 +202,153 @@ export function InterviewSessionPage({
     );
   };
 
+  const chatContent = (
+    <div className="rounded-3xl bg-white px-6 py-10 shadow-sm sm:p-12">
+      <div className="mx-auto max-w-4xl space-y-10">
+        <header className="space-y-2">
+          <h1>Interview session</h1>
+          <p className="text-muted-foreground">
+            Monitor the conversation, capture notes, and drive the candidate
+            experience.
+          </p>
+        </header>
+
+        <div className="space-y-8">
+          {messages.map((message) => {
+            if (message.type === "system") {
+              return (
+                <div key={message.id} className="flex justify-center">
+                  <div className="rounded-full bg-muted px-4 py-1.5 text-center">
+                    <p className="text-sm font-medium text-muted-foreground">
+                      {message.content}
+                    </p>
+                  </div>
+                </div>
+              );
+            }
+
+            const isCandidate = message.type === "candidate";
+
+            return (
+              <div key={message.id} className="flex">
+                <div
+                  className={`flex w-full flex-col gap-3 ${
+                    isCandidate ? "items-end text-right" : "items-start"
+                  }`}
+                >
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    {isCandidate ? (
+                      <>
+                        <Badge variant="outline" className="text-xs font-medium">
+                          {message.sentiment}
+                        </Badge>
+                        <span className="font-medium">
+                          {resolveSpeakerLabel(message.type)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="font-medium">
+                          {resolveSpeakerLabel(message.type)}
+                        </span>
+                        <Badge variant="outline" className="text-xs font-medium">
+                          {message.sentiment}
+                        </Badge>
+                      </>
+                    )}
+                  </div>
+                  <div
+                    className="max-w-[680px] rounded-2xl px-6 py-4 text-base leading-relaxed text-foreground shadow-[0_12px_40px_-24px_rgba(16,24,40,0.45)]"
+                    style={{
+                      backgroundColor: isCandidate ? "#DAC7F4" : "#CFE9D8",
+                    }}
+                  >
+                    {message.content}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="space-y-4">
+          <Textarea
+            placeholder="Draft prompts, capture coaching notes, or summarize key evidence..."
+            value={inputValue}
+            onChange={(event) => setInputValue(event.target.value)}
+            rows={6}
+            className="resize-none"
+          />
+
+          <div className="flex justify-end">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleSend}
+              className="flex items-center gap-2"
+            >
+              <Send className="h-4 w-4" />
+              Send
+            </Button>
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-center gap-3">
+            <Button
+              onClick={handleStart}
+              disabled={isStarted && !isPaused}
+              variant={isStarted && !isPaused ? "secondary" : "default"}
+              className="flex items-center gap-2"
+            >
+              <Play className="h-4 w-4" />
+              Start
+            </Button>
+
+            <Button
+              onClick={handlePause}
+              disabled={!isStarted || isPaused}
+              variant="outline"
+              className="flex items-center gap-2"
+            >
+              <Pause className="h-4 w-4" />
+              Pause
+            </Button>
+
+            <Button
+              onClick={handleStop}
+              disabled={!isStarted}
+              variant="destructive"
+              className="flex items-center gap-2"
+            >
+              <Square className="h-4 w-4" />
+              Stop
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-6">
+            <div className="flex items-center gap-2">
+              <Switch
+                checked={autoGenerate}
+                onCheckedChange={setAutoGenerate}
+              />
+              <span className="whitespace-nowrap text-sm">Auto-generate</span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Switch checked={autoSend} onCheckedChange={setAutoSend} />
+              <span className="whitespace-nowrap text-sm">Auto-send</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <Button
             type="button"
             variant="ghost"
@@ -195,126 +374,7 @@ export function InterviewSessionPage({
           </div>
         </div>
 
-        <Card className="overflow-hidden">
-          <CardHeader>
-            <CardTitle>Interview session</CardTitle>
-            <CardDescription>
-              Monitor the conversation, capture notes, and drive the candidate
-              experience.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            <div className="rounded-lg border bg-background p-4">
-              <ScrollArea className="h-[25rem] pr-4">
-                <div className="flex flex-col gap-4">
-                  {chatMessages.map((message) => (
-                    <div
-                      key={message.id}
-                      className={`rounded-lg border p-3 text-sm leading-relaxed ${
-                        message.speaker === "Candidate"
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                          : message.speaker === "Interviewer"
-                            ? "border-sky-200 bg-sky-50 text-sky-900"
-                            : "border-slate-200 bg-slate-50 text-slate-700"
-                      }`}
-                    >
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <span className="font-medium">{message.speaker}</span>
-                        <Badge
-                          variant={
-                            message.tone === "positive"
-                              ? "secondary"
-                              : "outline"
-                          }
-                        >
-                          {message.tone}
-                        </Badge>
-                      </div>
-                      <p>{message.content}</p>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </div>
-
-            <div className="flex flex-col gap-3 lg:flex-row">
-              <Textarea
-                placeholder="Draft prompts, capture coaching notes, or summarize key evidence..."
-                className="flex-1"
-                rows={4}
-              />
-              <Button
-                type="button"
-                className="lg:h-full lg:min-w-[9rem]"
-                variant="secondary"
-              >
-                <Send className="h-4 w-4" />
-                Send
-              </Button>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-3">
-              <Button type="button" size="lg" className="min-w-[9rem]">
-                <Play className="h-4 w-4" />
-                Start
-              </Button>
-              <Button
-                type="button"
-                size="lg"
-                variant="secondary"
-                className="min-w-[9rem]"
-              >
-                <Pause className="h-4 w-4" />
-                Pause
-              </Button>
-              <Button
-                type="button"
-                size="lg"
-                variant="destructive"
-                className="min-w-[9rem]"
-              >
-                <Square className="h-4 w-4" />
-                Stop
-              </Button>
-              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium text-slate-700">
-                    Auto-generate
-                  </Label>
-                  <p className="text-xs text-muted-foreground">
-                    {autoGenerate === 1 ? "On" : "Off"}
-                  </p>
-                </div>
-                <Slider
-                  className="w-24"
-                  min={0}
-                  max={1}
-                  step={1}
-                  value={[autoGenerate]}
-                  onValueChange={(value) => setAutoGenerate(value[0] ?? 0)}
-                />
-              </div>
-              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-                <div className="space-y-1">
-                  <Label className="text-xs font-medium text-slate-700">
-                    Auto-send
-                  </Label>
-                  <p className="text-xs text-muted-foreground">
-                    {autoSend === 1 ? "On" : "Off"}
-                  </p>
-                </div>
-                <Slider
-                  className="w-24"
-                  min={0}
-                  max={1}
-                  step={1}
-                  value={[autoSend]}
-                  onValueChange={(value) => setAutoSend(value[0] ?? 0)}
-                />
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+        {chatContent}
 
         <Card>
           <CardHeader>
@@ -346,7 +406,7 @@ export function InterviewSessionPage({
               ].map((item) => (
                 <div
                   key={item.label}
-                  className="min-w-[12rem] rounded-md border border-slate-200 bg-slate-50 p-3"
+                  className="min-w-[12rem] rounded-md border border-slate-200 bg-white p-3"
                 >
                   <p className="text-xs uppercase text-muted-foreground">
                     {item.label}
@@ -388,9 +448,7 @@ export function InterviewSessionPage({
                       {row.criterion}
                     </TableCell>
                     <TableCell>{row.weight}%</TableCell>
-                    <TableCell>
-                      {renderLevelBadges(row.achievedLevel)}
-                    </TableCell>
+                    <TableCell>{renderLevelBadges(row.achievedLevel)}</TableCell>
                     <TableCell className="text-right font-semibold">
                       {row.rawScore.toFixed(1)}
                     </TableCell>
@@ -449,7 +507,7 @@ export function InterviewSessionPage({
                   {overallScore}
                 </p>
               </div>
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">
+              <div className="rounded-md border border-slate-200 bg-white p-4 text-sm text-muted-foreground">
                 Scores update dynamically as evidence is captured. Use this
                 section to validate calibration decisions before submitting
                 final feedback.
