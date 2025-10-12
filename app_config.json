@@ -5,7 +5,7 @@
       "base_url": "http://192.168.0.132:1234",
       "endpoint": "/v1/chat/completions",
       "model": "openai/gpt-oss-20b",
-      "timeout_s": 30.0,
+      "timeout_s": 60.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
@@ -15,7 +15,7 @@
       "base_url": "http://192.168.0.132:1234",
       "endpoint": "/v1/chat/completions",
       "model": "qwen/qwen3-4b-2507",
-      "timeout_s": 30.0,
+      "timeout_s": 60.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
@@ -23,6 +23,7 @@
   },
   "registry": {
     "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
-    "rubric_design.generate_rubric": "qwen3-4b-local"
+    "rubric_design.generate_rubric": "qwen3-4b-local",
+    "interview_session.generate_warmup_question": "qwen3-4b-local"
   }
 }
