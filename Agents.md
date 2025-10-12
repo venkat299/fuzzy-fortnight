@@ -9,6 +9,8 @@ Updated Codex prompt:
 - Per-module and per-function LLM settings live in the common config: base URL, model, endpoint, timeouts, retries. Inject config. No global mutable state.
 - Separate I/O from logic. Prefer pure functions. Return data, do not print.
 - Design modules to be moveable to microservices without code changes.
+- do not use hardcoded questions or answers or classic parsing. Use LLM calls for question generation, answering, answer evaluation strictly
+- Use Langraph and lancghchain wherever necessary for clean structuring and to avoid code bloat and config bloat
 
 Pydantic and JSON enforcement:
 
