@@ -7,12 +7,14 @@ from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from jd_analysis import CompetencyMatrix, JobProfile, analyze_with_config
 from llm_gateway import LlmGatewayError
 
 from candidate_management import CandidateRecord, CandidateStore
+from flow_manager import InterviewContext as FlowContext, start_session_with_config
+from candidate_agent import QuestionAnswer, auto_reply_with_config
 from rubric_design import (
     InterviewRubricSnapshot,
     RubricStore,
@@ -69,6 +71,41 @@ class CreateCandidateRequest(BaseModel):  # Candidate creation payload
     resume: str
     interview_id: Optional[str] = None
     status: str
+
+
+class StartSessionRequest(BaseModel):  # Start interview session payload
+    candidate_id: str
+    auto_answer_enabled: bool = False
+    candidate_level: int = Field(default=3, ge=1, le=5)
+    qa_history: List[QuestionAnswer] = Field(default_factory=list)
+
+
+class SessionContext(BaseModel):  # Session context returned to UI
+    stage: str
+    interview_id: str
+    candidate_name: str
+    job_title: str
+    resume_summary: str
+    auto_answer_enabled: bool
+    candidate_level: int
+    qa_history: List[QuestionAnswer] = Field(default_factory=list)
+
+
+class SessionMessage(BaseModel):  # Chat message returned to UI
+    speaker: str
+    content: str
+    tone: str
+
+
+class StartSessionResponse(BaseModel):  # Combined context payload and rubric
+    context: SessionContext
+    messages: List[SessionMessage]
+    rubric: InterviewRubricSnapshot
+
+
+class SessionAdvanceResponse(BaseModel):  # Warmup payload returned after start
+    context: SessionContext
+    messages: List[SessionMessage]
 
 
 @app.post("/api/competency-matrix", response_model=CompetencyMatrixResponse)
@@ -158,5 +195,165 @@ def fetch_interview_rubric(interview_id: str) -> InterviewRubricSnapshot:  # Ret
         return load_rubrics(interview_id, db_path=DATA_PATH)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interview not found") from exc
+
+
+@app.post("/api/interviews/{interview_id}/session", response_model=StartSessionResponse)
+def start_interview_session(
+    interview_id: str,
+    payload: StartSessionRequest,
+) -> StartSessionResponse:  # Launch interview session warmup
+    snapshot, candidate, resume_summary, highlighted = _load_session_resources(
+        interview_id, payload.candidate_id
+    )
+    context = FlowContext(
+        interview_id=interview_id,
+        stage="warmup",
+        candidate_name=candidate.full_name,
+        job_title=snapshot.job_title,
+        resume_summary=resume_summary,
+        highlighted_experiences=highlighted,
+    )
+    response_context = SessionContext(
+        stage=context.stage,
+        interview_id=context.interview_id,
+        candidate_name=context.candidate_name,
+        job_title=context.job_title,
+        resume_summary=context.resume_summary,
+        auto_answer_enabled=payload.auto_answer_enabled,
+        candidate_level=payload.candidate_level,
+        qa_history=list(payload.qa_history),
+    )
+    return StartSessionResponse(
+        context=response_context,
+        messages=[],
+        rubric=snapshot,
+    )
+
+
+@app.post("/api/interviews/{interview_id}/session/start", response_model=SessionAdvanceResponse)
+def begin_interview_warmup(
+    interview_id: str,
+    payload: StartSessionRequest,
+) -> SessionAdvanceResponse:  # Trigger warmup agent when interviewer presses start
+    snapshot, candidate, resume_summary, highlighted = _load_session_resources(
+        interview_id, payload.candidate_id
+    )
+    context = FlowContext(
+        interview_id=interview_id,
+        stage="warmup",
+        candidate_name=candidate.full_name,
+        job_title=snapshot.job_title,
+        resume_summary=resume_summary,
+        highlighted_experiences=highlighted,
+    )
+    try:
+        launch = start_session_with_config(context, config_path=CONFIG_PATH)
+    except LlmGatewayError as exc:
+        logger.exception("Warmup agent failed")
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail="Unable to load interview rubric") from exc
+        logger.exception("Unable to start warmup stage")
+        raise HTTPException(status_code=500, detail="Unable to start warmup stage") from exc
+
+    response_messages = [
+        SessionMessage(
+            speaker=message.speaker,
+            content=message.content,
+            tone=message.tone,
+        )
+        for message in launch.messages
+    ]
+    updated_history: List[QuestionAnswer] = list(payload.qa_history)
+    if payload.auto_answer_enabled:
+        interviewer_turn = next(
+            (
+                turn
+                for turn in reversed(launch.messages)
+                if turn.speaker.lower() == "interviewer" and turn.content.strip()
+            ),
+            None,
+        )
+        if interviewer_turn is not None:
+            try:
+                outcome = auto_reply_with_config(
+                    interviewer_turn.content,
+                    resume_summary=resume_summary,
+                    history=updated_history,
+                    level=payload.candidate_level,
+                    config_path=CONFIG_PATH,
+                )
+            except LlmGatewayError as exc:
+                logger.exception("Candidate auto-answer failed")
+                raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Unexpected error during candidate auto-answer")
+                raise HTTPException(status_code=500, detail="Unable to generate candidate reply") from exc
+            updated_history = outcome.history
+            response_messages.append(
+                SessionMessage(
+                    speaker="Candidate",
+                    content=outcome.message.answer,
+                    tone=outcome.tone,
+                )
+            )
+    response_context = SessionContext(
+        stage=launch.context.stage,
+        interview_id=launch.context.interview_id,
+        candidate_name=launch.context.candidate_name,
+        job_title=launch.context.job_title,
+        resume_summary=launch.context.resume_summary,
+        auto_answer_enabled=payload.auto_answer_enabled,
+        candidate_level=payload.candidate_level,
+        qa_history=updated_history,
+    )
+    return SessionAdvanceResponse(
+        context=response_context,
+        messages=response_messages,
+    )
+
+
+def _collect_highlights(snapshot: InterviewRubricSnapshot, limit: int = 6) -> List[str]:  # Pull notable evidence lines
+    highlights: List[str] = []
+    for rubric in snapshot.rubrics:
+        highlights.extend(_trim_evidence(rubric.evidence, limit - len(highlights)))
+        if len(highlights) >= limit:
+            break
+    return highlights
+
+
+def _load_session_resources(
+    interview_id: str,
+    candidate_id: str,
+) -> tuple[InterviewRubricSnapshot, CandidateRecord, str, List[str]]:  # Load rubric, candidate, and prompts
+    rubric_store = RubricStore(DATA_PATH)
+    try:
+        snapshot = rubric_store.load(interview_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Interview not found") from exc
+    candidate_store = CandidateStore(DATA_PATH)
+    try:
+        candidate = candidate_store.get(candidate_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Candidate not found") from exc
+    highlighted = _collect_highlights(snapshot)
+    resume_summary = _summarize_resume(candidate.resume)
+    return snapshot, candidate, resume_summary, highlighted
+
+
+def _trim_evidence(evidence: List[str], remaining: int) -> List[str]:  # Trim evidence list respecting remaining slots
+    entries: List[str] = []
+    for item in evidence:
+        if remaining <= 0:
+            break
+        text = item.strip()
+        if text:
+            entries.append(text)
+            remaining -= 1
+    return entries
+
+
+def _summarize_resume(resume: str, limit: int = 600) -> str:  # Compact resume text for flow context
+    compact = " ".join(resume.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"

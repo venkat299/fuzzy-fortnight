@@ -53,6 +53,42 @@ interface InterviewRubricData {
   rubrics: Rubric[];
 }
 
+type ChatTone = "neutral" | "positive";
+
+interface QuestionAnswer {
+  question: string;
+  answer: string;
+}
+
+interface SessionMessage {
+  id: string;
+  speaker: "Candidate" | "Interviewer" | "System";
+  content: string;
+  tone: ChatTone;
+}
+
+interface SessionContextData {
+  stage: string;
+  interviewId: string;
+  candidateName: string;
+  jobTitle: string;
+  resumeSummary: string;
+  autoAnswerEnabled: boolean;
+  candidateLevel: number;
+  qaHistory: QuestionAnswer[];
+}
+
+interface SessionLaunchData {
+  rubric: InterviewRubricData;
+  context: SessionContextData;
+  messages: SessionMessage[];
+}
+
+interface SessionProgressData {
+  context: SessionContextData;
+  messages: SessionMessage[];
+}
+
 interface DashboardInterview {
   interviewId: string;
   jobTitle: string;
@@ -99,6 +135,13 @@ export default function App() {
   const [candidateFormError, setCandidateFormError] = useState<string | null>(null);
   const [isCandidateSubmitting, setIsCandidateSubmitting] = useState(false);
   const [currentSession, setCurrentSession] = useState<InterviewAssignment | null>(null);
+  const [sessionRubric, setSessionRubric] = useState<InterviewRubricData | null>(null);
+  const [sessionMessages, setSessionMessages] = useState<SessionMessage[]>([]);
+  const [autoAnswerEnabled, setAutoAnswerEnabled] = useState(false);
+  const [candidateReplyLevel, setCandidateReplyLevel] = useState(1);
+  const [qaHistory, setQaHistory] = useState<QuestionAnswer[]>([]);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [isStartingWarmup, setIsStartingWarmup] = useState(false);
   const [candidateToEdit, setCandidateToEdit] = useState<DashboardCandidate | null>(null);
 
   const normalizeMatrix = (payload: unknown, fallback: InterviewData): CompetencyMatrix => {
@@ -256,6 +299,114 @@ export default function App() {
       status: String(source.status ?? ''),
       rubrics
     };
+  };
+
+  const mapSpeaker = (value: string): SessionMessage['speaker'] => {
+    const normalized = value.toLowerCase();
+    if (normalized.includes('candidate')) {
+      return 'Candidate';
+    }
+    if (normalized.includes('system')) {
+      return 'System';
+    }
+    return 'Interviewer';
+  };
+
+  const parseSessionContext = (contextSource: unknown, fallback: InterviewRubricData): SessionContextData | null => {
+    if (!contextSource || typeof contextSource !== 'object') {
+      return null;
+    }
+    const contextRow = contextSource as Record<string, unknown>;
+    const autoAnswerEnabled =
+      typeof contextRow.auto_answer_enabled === 'boolean'
+        ? contextRow.auto_answer_enabled
+        : String(contextRow.auto_answer_enabled ?? '').toLowerCase() === 'true';
+    let candidateLevel = Number(contextRow.candidate_level ?? 1);
+    if (!Number.isFinite(candidateLevel)) {
+      candidateLevel = 1;
+    }
+    candidateLevel = Math.min(5, Math.max(1, Math.round(candidateLevel)));
+    const historySource = Array.isArray(contextRow.qa_history) ? contextRow.qa_history : [];
+    const history: QuestionAnswer[] = historySource
+      .map((item) => {
+        if (!item || typeof item !== 'object') {
+          return null;
+        }
+        const row = item as Record<string, unknown>;
+        const question = String(row.question ?? '').trim();
+        const answer = String(row.answer ?? '').trim();
+        if (!question && !answer) {
+          return null;
+        }
+        return { question, answer } satisfies QuestionAnswer;
+      })
+      .filter((entry): entry is QuestionAnswer => Boolean(entry));
+    return {
+      stage: String(contextRow.stage ?? 'warmup'),
+      interviewId: String(contextRow.interview_id ?? fallback.interviewId),
+      candidateName: String(contextRow.candidate_name ?? ''),
+      jobTitle: String(contextRow.job_title ?? fallback.jobTitle),
+      resumeSummary: String(contextRow.resume_summary ?? ''),
+      autoAnswerEnabled,
+      candidateLevel,
+      qaHistory: history,
+    };
+  };
+
+  const parseSessionMessages = (source: unknown): SessionMessage[] => {
+    const messagesSource = Array.isArray(source) ? source : [];
+    return messagesSource
+      .map((entry, index) => {
+        if (!entry || typeof entry !== 'object') {
+          return null;
+        }
+        const row = entry as Record<string, unknown>;
+        const content = String(row.content ?? '').trim();
+        if (!content) {
+          return null;
+        }
+        const speakerValue = String(row.speaker ?? '').trim();
+        const toneValue = typeof row.tone === 'string' ? row.tone.toLowerCase() : '';
+        const tone: ChatTone = toneValue === 'positive' ? 'positive' : 'neutral';
+        return {
+          id: String(index + 1),
+          speaker: mapSpeaker(speakerValue),
+          content,
+          tone,
+        } satisfies SessionMessage;
+      })
+      .filter((message): message is SessionMessage => Boolean(message));
+  };
+
+  const normalizeSessionLaunch = (payload: unknown): SessionLaunchData | null => {
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+    const source = payload as Record<string, unknown>;
+    const rubricPayload = source.rubric;
+    const rubric = normalizeRubric(rubricPayload);
+    if (!rubric) {
+      return null;
+    }
+    const context = parseSessionContext(source.context, rubric);
+    if (!context) {
+      return null;
+    }
+    const messages = parseSessionMessages(source.messages);
+    return { rubric, context, messages };
+  };
+
+  const normalizeSessionProgress = (payload: unknown, fallback: InterviewRubricData | null): SessionProgressData | null => {
+    if (!payload || typeof payload !== 'object' || !fallback) {
+      return null;
+    }
+    const source = payload as Record<string, unknown>;
+    const context = parseSessionContext(source.context, fallback);
+    if (!context) {
+      return null;
+    }
+    const messages = parseSessionMessages(source.messages);
+    return { context, messages };
   };
 
   const fetchInterviews = useCallback(async () => {
@@ -454,16 +605,132 @@ export default function App() {
     }
   };
 
-  const launchInterviewFromDashboard = (assignment: InterviewAssignment) => {
+  const handleAutoAnswerToggle = useCallback((enabled: boolean) => {
+    setAutoAnswerEnabled(enabled);
+  }, []);
+
+  const handleCandidateReplyLevelChange = useCallback((level: number) => {
+    const clamped = Math.min(5, Math.max(1, Math.round(level)));
+    setCandidateReplyLevel(clamped);
+  }, []);
+
+  const startSession = async (assignment: InterviewAssignment) => {
     setCandidateFormError(null);
     setErrorMessage(null);
-    setIsProceeding(false);
-    setCurrentSession(assignment);
-    setCurrentState('interview-session');
+    setInterviewsError(null);
+    setIsProceeding(true);
+    setSessionRubric(null);
+    setSessionMessages([]);
+    setQaHistory([]);
+    setSessionError(null);
+    try {
+      const requestHistory: QuestionAnswer[] = [];
+      const response = await fetch(`/api/interviews/${assignment.interviewId}/session`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          candidate_id: assignment.candidateId,
+          auto_answer_enabled: autoAnswerEnabled,
+          candidate_level: candidateReplyLevel,
+          qa_history: requestHistory
+        })
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to launch interview session.';
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      const normalized = normalizeSessionLaunch(payload);
+      if (!normalized) {
+        throw new Error('Received an invalid session response.');
+      }
+      setSessionRubric(normalized.rubric);
+      setSessionMessages(normalized.messages);
+      setAutoAnswerEnabled(normalized.context.autoAnswerEnabled);
+      setCandidateReplyLevel(normalized.context.candidateLevel);
+      setQaHistory(normalized.context.qaHistory);
+      setSessionError(null);
+      setCurrentSession(assignment);
+      setCurrentState('interview-session');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to launch interview session.';
+      setInterviewsError(message);
+    } finally {
+      setIsProceeding(false);
+    }
+  };
+
+  const beginWarmup = useCallback(async () => {
+    if (!currentSession || !sessionRubric) {
+      return;
+    }
+    setSessionError(null);
+    setIsStartingWarmup(true);
+    try {
+      const response = await fetch(`/api/interviews/${currentSession.interviewId}/session/start`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          candidate_id: currentSession.candidateId,
+          auto_answer_enabled: autoAnswerEnabled,
+          candidate_level: candidateReplyLevel,
+          qa_history: qaHistory
+        })
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null);
+        const detail =
+          errorPayload && typeof errorPayload.detail === 'string'
+            ? errorPayload.detail
+            : 'Failed to start warmup.';
+        throw new Error(detail);
+      }
+      const payload = await response.json();
+      const normalized = normalizeSessionProgress(payload, sessionRubric);
+      if (!normalized) {
+        throw new Error('Received an invalid warmup response.');
+      }
+      setSessionMessages(normalized.messages);
+      setAutoAnswerEnabled(normalized.context.autoAnswerEnabled);
+      setCandidateReplyLevel(normalized.context.candidateLevel);
+      setQaHistory(normalized.context.qaHistory);
+      setSessionError(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to start warmup.';
+      setSessionError(message);
+    } finally {
+      setIsStartingWarmup(false);
+    }
+  }, [
+    autoAnswerEnabled,
+    candidateReplyLevel,
+    currentSession,
+    normalizeSessionProgress,
+    qaHistory,
+    sessionRubric
+  ]);
+
+  const launchInterviewFromDashboard = (assignment: InterviewAssignment) => {
+    void startSession(assignment);
   };
 
   const closeInterviewSession = () => {
     setCurrentSession(null);
+    setSessionRubric(null);
+    setSessionMessages([]);
+    setQaHistory([]);
+    setSessionError(null);
+    setIsStartingWarmup(false);
+    setAutoAnswerEnabled(false);
+    setCandidateReplyLevel(3);
     setCurrentState('interviewer-overview');
   };
 
@@ -579,13 +846,22 @@ export default function App() {
       );
 
     case 'interview-session':
-      if (!currentSession) {
+      if (!currentSession || !sessionRubric) {
         return null;
       }
       return (
         <InterviewSessionPage
           assignment={currentSession}
+          rubric={sessionRubric}
+          messages={sessionMessages}
+          autoAnswerEnabled={autoAnswerEnabled}
+          candidateReplyLevel={candidateReplyLevel}
+          onAutoAnswerToggle={handleAutoAnswerToggle}
+          onCandidateReplyLevelChange={handleCandidateReplyLevelChange}
           onBackToDashboard={closeInterviewSession}
+          onStartInterview={beginWarmup}
+          isStarting={isStartingWarmup}
+          sessionError={sessionError}
         />
       );
 

@@ -11,6 +11,7 @@ Updated Codex prompt:
 - Design modules to be moveable to microservices without code changes.
 - do not use hardcoded questions or answers or classic parsing. Use LLM calls for question generation, answering, answer evaluation strictly
 - Use Langraph and langchain wherever necessary for clean structuring and to avoid code bloat and config bloat
+- Implement each agent in its own module file under a dedicated package (no multiple agents per file).
 
 Pydantic and JSON enforcement:
 

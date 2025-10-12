@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Pause, Play, Send, Square } from "lucide-react";
 import {
   Card,
@@ -21,12 +21,56 @@ import {
   TableRow,
 } from "./ui/table";
 import { ScrollArea } from "./ui/scroll-area";
-import { Slider } from "./ui/slider";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "./ui/select";
 import type { InterviewAssignment } from "./InterviewerOverview";
+
+interface RubricAnchor {
+  level: number;
+  text: string;
+}
+
+interface RubricCriterion {
+  name: string;
+  weight: number;
+  anchors: RubricAnchor[];
+}
+
+interface RubricEntry {
+  competency: string;
+  band: string;
+  bandNotes: string[];
+  criteria: RubricCriterion[];
+  redFlags: string[];
+  evidence: string[];
+  minPassScore: number;
+}
+
+interface InterviewRubricData {
+  interviewId: string;
+  jobTitle: string;
+  experienceYears: string;
+  status: string;
+  rubrics: RubricEntry[];
+}
 
 interface InterviewSessionPageProps {
   assignment: InterviewAssignment;
+  rubric: InterviewRubricData;
+  messages: ChatMessage[];
+  autoAnswerEnabled: boolean;
+  candidateReplyLevel: number;
+  onAutoAnswerToggle: (enabled: boolean) => void;
+  onCandidateReplyLevelChange: (level: number) => void;
   onBackToDashboard: () => void;
+  onStartInterview: () => Promise<void>;
+  isStarting: boolean;
+  sessionError: string | null;
 }
 
 interface ChatMessage {
@@ -51,101 +95,102 @@ interface CompetencySummary {
 
 export function InterviewSessionPage({
   assignment,
+  rubric,
+  messages,
+  autoAnswerEnabled,
+  candidateReplyLevel,
+  onAutoAnswerToggle,
+  onCandidateReplyLevelChange,
   onBackToDashboard,
+  onStartInterview,
+  isStarting,
+  sessionError,
 }: InterviewSessionPageProps) {
-  const [autoGenerate, setAutoGenerate] = useState(1);
-  const [autoSend, setAutoSend] = useState(0);
+  const [autoGenerate, setAutoGenerate] = useState(true);
+  const [localReplyLevel, setLocalReplyLevel] = useState(candidateReplyLevel);
+  const chatMessages = useMemo(() => messages, [messages]);
+  const hasStarted = chatMessages.length > 0;
+  const startLabel = isStarting ? "Starting..." : hasStarted ? "Started" : "Start";
 
-  const chatMessages = useMemo<ChatMessage[]>(() => {
-    return [
-      {
-        id: "1",
-        speaker: "System",
-        content:
-          "Interview session initialized. Provide a warm introduction and outline the interview structure.",
-        tone: "neutral",
-      },
-      {
-        id: "2",
-        speaker: "Interviewer",
-        content: `Hi ${assignment.candidateName}, thanks for joining today. We will walk through a few scenario questions to understand your approach to ${assignment.jobTitle.toLowerCase()}.`,
-        tone: "positive",
-      },
-      {
-        id: "3",
-        speaker: "Candidate",
-        content:
-          "Excited to be here! Looking forward to discussing my experience and learning more about the role.",
-        tone: "positive",
-      },
-      {
-        id: "4",
-        speaker: "Interviewer",
-        content:
-          "Great. Let’s start with a situation where you owned a data project from end to end. How did you align the team on the success criteria?",
-        tone: "neutral",
-      },
-    ];
-  }, [assignment.candidateName, assignment.jobTitle]);
+  useEffect(() => {
+    setLocalReplyLevel(candidateReplyLevel);
+  }, [candidateReplyLevel]);
+
+  const handleAutoGenerateToggle = useCallback(() => {
+    setAutoGenerate((previous) => !previous);
+  }, []);
+
+  const handleReplyLevelChange = useCallback(
+    (value: string) => {
+      if (!autoAnswerEnabled) {
+        return;
+      }
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed)) {
+        return;
+      }
+      const level = Math.min(5, Math.max(1, Math.round(parsed)));
+      setLocalReplyLevel(level);
+      onCandidateReplyLevelChange(level);
+    },
+    [autoAnswerEnabled, onCandidateReplyLevelChange],
+  );
 
   const criteriaRows = useMemo<CriterionRow[]>(() => {
-    return [
-      {
-        competency: "Communication",
-        criterion: "Clarifies ambiguous requirements with stakeholders",
-        weight: 20,
-        achievedLevel: 3,
-        rawScore: 12,
-      },
-      {
-        competency: "Technical Depth",
-        criterion: "Chooses appropriate modelling techniques for the problem",
-        weight: 25,
-        achievedLevel: 4,
-        rawScore: 18,
-      },
-      {
-        competency: "Execution",
-        criterion:
-          "Breaks work into measurable milestones with risks identified",
-        weight: 25,
-        achievedLevel: 3,
-        rawScore: 15,
-      },
-      {
-        competency: "Collaboration",
-        criterion:
-          "Drives alignment across functions with proactive communication",
-        weight: 15,
-        achievedLevel: 4,
-        rawScore: 12,
-      },
-      {
-        competency: "Ownership",
-        criterion: "Reflects on outcomes and proposes clear next steps",
-        weight: 15,
-        achievedLevel: 2,
-        rawScore: 7,
-      },
-    ];
-  }, []);
+    const rows: CriterionRow[] = [];
+    rubric.rubrics.forEach((entry) => {
+      const competencyName = entry.competency.trim();
+      if (!competencyName) {
+        return;
+      }
+      entry.criteria.forEach((criterion) => {
+        const criterionName = criterion.name.trim();
+        if (!criterionName) {
+          return;
+        }
+        const weightValue = Number.isFinite(criterion.weight)
+          ? Math.max(0, Math.round(criterion.weight * 1000) / 10)
+          : 0;
+        rows.push({
+          competency: competencyName,
+          criterion: criterionName,
+          weight: weightValue,
+          achievedLevel: 1,
+          rawScore: 0,
+        });
+      });
+    });
+    return rows;
+  }, [rubric]);
 
   const competencyScores = useMemo<CompetencySummary[]>(() => {
-    return [
-      { competency: "Communication", score: 64 },
-      { competency: "Technical Depth", score: 78 },
-      { competency: "Execution", score: 70 },
-      { competency: "Collaboration", score: 82 },
-      { competency: "Ownership", score: 48 },
-    ];
-  }, []);
+    const seen = new Set<string>();
+    const scores: CompetencySummary[] = [];
+    rubric.rubrics.forEach((entry) => {
+      const name = entry.competency.trim();
+      if (!name || seen.has(name)) {
+        return;
+      }
+      seen.add(name);
+      scores.push({ competency: name, score: 0 });
+    });
+    return scores;
+  }, [rubric]);
 
-  const stageProgress = 42;
-  const stageName = "Scenario Deep Dive";
-  const activeCompetency = "Technical Depth";
-  const questionsAsked = 4;
-  const timeElapsed = "08:14";
-  const overallScore = 67;
+  const firstCriterion = criteriaRows[0];
+  const stageProgress = 0;
+  const stageName = firstCriterion ? `Focus: ${firstCriterion.criterion}` : "Scenario kickoff";
+  const activeCompetency = firstCriterion ? firstCriterion.competency : "—";
+  const questionsAsked = 0;
+  const timeElapsed = "00:00";
+  const overallScore = 0;
+
+  const formatWeight = (weight: number) => {
+    if (Number.isInteger(weight)) {
+      return `${weight}%`;
+    }
+    return `${weight.toFixed(1)}%`;
+  };
 
   const renderLevelBadges = (achieved: CriterionRow["achievedLevel"]) => {
     return (
@@ -254,9 +299,17 @@ export function InterviewSessionPage({
             </div>
 
             <div className="flex flex-wrap items-center justify-end gap-3">
-              <Button type="button" size="lg" className="min-w-[9rem]">
+              <Button
+                type="button"
+                size="lg"
+                className="min-w-[9rem]"
+                onClick={() => {
+                  void onStartInterview();
+                }}
+                disabled={isStarting || hasStarted}
+              >
                 <Play className="h-4 w-4" />
-                Start
+                {startLabel}
               </Button>
               <Button
                 type="button"
@@ -276,43 +329,76 @@ export function InterviewSessionPage({
                 <Square className="h-4 w-4" />
                 Stop
               </Button>
-              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                 <div className="space-y-1">
                   <Label className="text-xs font-medium text-slate-700">
                     Auto-generate
                   </Label>
                   <p className="text-xs text-muted-foreground">
-                    {autoGenerate === 1 ? "On" : "Off"}
+                    {autoGenerate ? "Enabled" : "Disabled"}
                   </p>
                 </div>
-                <Slider
-                  className="w-24"
-                  min={0}
-                  max={1}
-                  step={1}
-                  value={[autoGenerate]}
-                  onValueChange={(value) => setAutoGenerate(value[0] ?? 0)}
-                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={autoGenerate ? "default" : "outline"}
+                  onClick={handleAutoGenerateToggle}
+                >
+                  {autoGenerate ? "Disable" : "Enable"}
+                </Button>
               </div>
-              <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+              <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                 <div className="space-y-1">
                   <Label className="text-xs font-medium text-slate-700">
                     Auto-send
                   </Label>
                   <p className="text-xs text-muted-foreground">
-                    {autoSend === 1 ? "On" : "Off"}
+                    {autoAnswerEnabled ? "Enabled" : "Disabled"}
                   </p>
                 </div>
-                <Slider
-                  className="w-24"
-                  min={0}
-                  max={1}
-                  step={1}
-                  value={[autoSend]}
-                  onValueChange={(value) => setAutoSend(value[0] ?? 0)}
-                />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={autoAnswerEnabled ? "default" : "outline"}
+                  onClick={() => {
+                    onAutoAnswerToggle(!autoAnswerEnabled);
+                  }}
+                >
+                  {autoAnswerEnabled ? "Disable" : "Enable"}
+                </Button>
+                <div className="space-y-1">
+                  <Label className="text-xs font-medium text-slate-700">
+                    Reply level
+                  </Label>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={String(localReplyLevel)}
+                      onValueChange={handleReplyLevelChange}
+                      disabled={!autoAnswerEnabled}
+                    >
+                      <SelectTrigger className="w-28">
+                        <SelectValue aria-label={`Candidate reply level ${localReplyLevel}`} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[1, 2, 3, 4, 5].map((level) => (
+                          <SelectItem key={level} value={String(level)}>
+                            Level {level}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <span className="text-xs font-medium text-slate-700">
+                      {autoAnswerEnabled ? `Level ${localReplyLevel}` : "Enable to adjust"}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
+            {sessionError ? (
+              <div className="w-full text-right">
+                <p className="text-sm text-destructive">{sessionError}</p>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -387,7 +473,7 @@ export function InterviewSessionPage({
                     <TableCell className="text-sm text-muted-foreground">
                       {row.criterion}
                     </TableCell>
-                    <TableCell>{row.weight}%</TableCell>
+                    <TableCell>{formatWeight(row.weight)}</TableCell>
                     <TableCell>
                       {renderLevelBadges(row.achievedLevel)}
                     </TableCell>
