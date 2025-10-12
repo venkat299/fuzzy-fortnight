@@ -17,6 +17,8 @@ COPY api_server.py config.py app_config.json candidate_management.py ./
 COPY jd_analysis ./jd_analysis
 COPY llm_gateway ./llm_gateway
 COPY rubric_design ./rubric_design
+COPY flow_manager ./flow_manager
+COPY candidate_agent ./candidate_agent
 
 EXPOSE 8000
 

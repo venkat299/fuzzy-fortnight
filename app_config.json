@@ -12,7 +12,7 @@
     },
     "qwen3-4b-local": {
       "name": "qwen3-4b-local",
-      "base_url": "http://192.168.0.132:1234",
+      "base_url": "http://192.168.1.8:1234",
       "endpoint": "/v1/chat/completions",
       "model": "qwen/qwen3-4b-2507",
       "timeout_s": 30.0,
@@ -23,6 +23,8 @@
   },
   "registry": {
     "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
-    "rubric_design.generate_rubric": "qwen3-4b-local"
+    "rubric_design.generate_rubric": "qwen3-4b-local",
+    "flow_manager.warmup_agent": "qwen3-4b-local",
+    "candidate_agent.auto_reply": "qwen3-4b-local"
   }
 }
