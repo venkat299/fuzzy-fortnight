@@ -87,3 +87,6 @@ data/
 
 # Misc
 Thumbs.db
+docs/agent-implemetation-overview.md
+docs/codebase-report.md
+docs/interview-session-implementation-plan.md
