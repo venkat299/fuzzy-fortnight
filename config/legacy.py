@@ -1,4 +1,5 @@
-from __future__ import annotations  # Configuration schema for LLM routing
+"""Legacy configuration utilities kept for backwards compatibility."""
+from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Tuple, Type
@@ -6,7 +7,9 @@ from typing import Dict, Tuple, Type
 from pydantic import BaseModel, Field
 
 
-class LlmRoute(BaseModel):  # LLM endpoint configuration
+class LlmRoute(BaseModel):
+    """LLM endpoint configuration."""
+
     name: str
     base_url: str
     endpoint: str
@@ -19,17 +22,25 @@ class LlmRoute(BaseModel):  # LLM endpoint configuration
     sequential: bool = False
 
 
-class AppConfig(BaseModel):  # Application configuration root
+class AppConfig(BaseModel):
+    """Application configuration root."""
+
     llm_routes: Dict[str, LlmRoute]
     registry: Dict[str, str]
 
 
-def load_config(path: Path) -> AppConfig:  # Load configuration from disk
+def load_config(path: Path) -> AppConfig:
+    """Load configuration from disk."""
+
     data = path.read_text(encoding="utf-8")
     return AppConfig.model_validate_json(data)
 
 
-def resolve_registry(cfg: AppConfig, schemas: Dict[str, Type[BaseModel]]) -> Dict[str, Tuple[LlmRoute, Type[BaseModel]]]:  # Build registry with schemas
+def resolve_registry(
+    cfg: AppConfig, schemas: Dict[str, Type[BaseModel]]
+) -> Dict[str, Tuple[LlmRoute, Type[BaseModel]]]:
+    """Build a registry mapping with schemas."""
+
     resolved: Dict[str, Tuple[LlmRoute, Type[BaseModel]]] = {}
     for target, schema in schemas.items():
         if target not in cfg.registry:
@@ -43,6 +54,10 @@ def resolve_registry(cfg: AppConfig, schemas: Dict[str, Type[BaseModel]]) -> Dic
     return resolved
 
 
-def load_app_registry(path: Path, schemas: Dict[str, Type[BaseModel]]) -> Dict[str, Tuple[LlmRoute, Type[BaseModel]]]:  # Load config and build registry
+def load_app_registry(
+    path: Path, schemas: Dict[str, Type[BaseModel]]
+) -> Dict[str, Tuple[LlmRoute, Type[BaseModel]]]:
+    """Load configuration and build registry."""
+
     cfg = load_config(path)
     return resolve_registry(cfg, schemas)

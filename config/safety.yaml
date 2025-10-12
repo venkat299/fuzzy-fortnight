@@ -1,0 +1,48 @@
+version: 1
+precedence:
+  - unsafe
+  - jailbreak
+  - pii
+  - offtopic
+  - low_content
+
+categories:
+  unsafe:
+    severity: critical
+    patterns:
+      - "(?i)how to (build|make).*?(bomb|explosive|weapon)"
+      - "(?i)help me (hack|breach|bypass) (a|the) (system|account|network)"
+  jailbreak:
+    severity: high
+    patterns:
+      - "(?i)(ignore|bypass|override).*(rules|instructions|guardrails|system\\s*prompt)"
+      - "(?i)(reveal|print|dump).*(system\\s*prompt|hidden|private|confidential)"
+      - "(?i)(DAN|developer\\s*mode|unfiltered|no\\s*limitations|jailbreak)"
+  pii:
+    severity: high
+    patterns:
+      - "(?i)(ssn|social\\s*security|passport|driver'?s\\s*license)[:\\s]*\\d"
+      - "(?i)(api|access|secret|private).*?(key|token|credential)"
+  offtopic:
+    severity: low
+    patterns:
+      - "(?i)salary|compensation|visa\\s*sponsorship|holiday\\s*policy"
+      - "(?i)personal\\s*life|favorite\\s*movie|sports\\s*team"
+
+allow_lists:
+  topic:security:
+    - "prompt injection"
+    - "jailbreak"
+    - "system prompt"
+    - "guardrails"
+  topic:meta:
+    - "rubric"
+    - "scoring"
+    - "checkpoints"
+    - "FAISS"
+    - "memory"
+
+normalizers:
+  - strip_whitespace
+  - collapse_spaces
+  - to_lower
