@@ -13,7 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field, model_validator
 
-from config import AppConfig, LlmRoute, NoisySettings, load_config, resolve_registry
+from config import AppConfig, LlmRoute, NoisySettings, load_config, resolve_registry, load_app_registry
 from llm_gateway import call
 
 AUTO_REPLY_AGENT_KEY = "candidate_agent.auto_reply"  # Registry key for candidate auto replies

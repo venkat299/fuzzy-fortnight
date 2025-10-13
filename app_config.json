@@ -48,8 +48,10 @@
     "flow_manager.warmup_agent": "qwen3-4b-local",
     "flow_manager.competency_primer": "qwen3-4b-local",
     "flow_manager.competency_agent": "qwen3-4b-local",
-    "candidate_agent.auto_reply": "qwen2-human",
-    "flow_manager.evaluator_agent": "qwen3-4b-local"
+    "candidate_agent.auto_reply": "qwen3-4b-local",
+    "candidate_agent.noisy_candidate": "qwen2-human-raw",
+    "flow_manager.evaluator_agent": "qwen3-4b-local",
+    "flow_manager.persona_agent": "qwen2-human-raw"
   },
   "flow": {
     "warmup_questions": 1,
@@ -57,6 +59,6 @@
     "low_score_threshold": 2
   },
   "noisy": {
-    "enable_spelling_mistakes": true
+    "enable_spelling_mistakes": false
   }
 }
