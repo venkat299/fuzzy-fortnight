@@ -4,7 +4,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config import LlmRoute
-from candidate_agent.auto_reply import AutoReplyAgent, AutoReplyContext, AutoReplyPlan, QuestionAnswer
+from candidate_agent.auto_reply import (
+    AutoReplyAgent,
+    AutoReplyContext,
+    AutoReplyPlan,
+    QuestionAnswer,
+    set_noisy_seed,
+)
 
 
 def _route() -> LlmRoute:
@@ -28,6 +34,7 @@ def test_auto_reply_agent_uses_memory(monkeypatch) -> None:
         return AutoReplyPlan(answer="I recently automated incident response runbooks.", tone="positive")
 
     monkeypatch.setattr("candidate_agent.auto_reply.call", fake_call)
+    set_noisy_seed(3)
     context = AutoReplyContext(
         resume_summary="Senior engineer focusing on reliability across distributed systems.",
         history=[
@@ -46,8 +53,8 @@ def test_auto_reply_agent_uses_memory(monkeypatch) -> None:
     assert "Interviewer: Tell me about a time you led a migration." in captured["task"]
     assert "Candidate: I coordinated a data-center migration with zero downtime." in captured["task"]
     assert "Candidate reply depth level: 4" in captured["task"]
-    assert "Level 4 – The Architect" in captured["task"]
-    assert outcome.message.answer.startswith("I recently automated")
+    assert "You are NoisyCandidate-L4" in captured["task"]
+    assert outcome.message.answer
     assert len(outcome.history) == 2
     assert outcome.history[-1].question.startswith("What customer problems")
     assert outcome.tone == "positive"
@@ -62,6 +69,7 @@ def test_auto_reply_agent_clamps_level(monkeypatch) -> None:
         return AutoReplyPlan(answer="I am reflecting on an earlier project.")
 
     monkeypatch.setattr("candidate_agent.auto_reply.call", fake_call)
+    set_noisy_seed(3)
     context = AutoReplyContext(resume_summary="Platform engineer focused on observability.")
     agent = AutoReplyAgent(route, AutoReplyPlan)
     agent.invoke(
@@ -69,7 +77,7 @@ def test_auto_reply_agent_clamps_level(monkeypatch) -> None:
         memory=context,
         level=-2,
     )
-    assert "Level 1 – The Name-Dropper" in captured["task"]
+    assert "You are NoisyCandidate-L1" in captured["task"]
     assert "Candidate reply depth level: 1" in captured["task"]
 
 

@@ -49,7 +49,14 @@ def _lock_for(cfg: LlmRoute) -> threading.Lock:
     return lock
 
 
-def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClient] = None) -> T:  # Invoke configured LLM route and validate output
+def call(
+    task: str,
+    schema: Type[T],
+    *,
+    cfg: LlmRoute,
+    client: Optional[HttpClient] = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> T:  # Invoke configured LLM route and validate output
     def _execute() -> T:
         base_messages = []
         if cfg.enforce_json:
@@ -80,6 +87,8 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
                     }
                 )
             payload: Dict[str, Any] = {"model": cfg.model, "messages": messages}
+            if options:
+                payload.update(options)
             if cfg.response_format:
                 payload["response_format"] = {"type": cfg.response_format}
             headers = {"Content-Type": "application/json"}
