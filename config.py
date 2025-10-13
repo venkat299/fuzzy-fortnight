@@ -19,9 +19,16 @@ class LlmRoute(BaseModel):  # LLM endpoint configuration
     sequential: bool = False
 
 
+class FlowSettings(BaseModel):  # Interview flow configuration
+    warmup_questions: int = Field(default=1, ge=0)
+    max_competency_followups: int = Field(default=3, ge=1)
+    low_score_threshold: float = Field(default=2.5, ge=0.0, le=5.0)
+
+
 class AppConfig(BaseModel):  # Application configuration root
     llm_routes: Dict[str, LlmRoute]
     registry: Dict[str, str]
+    flow: FlowSettings = Field(default_factory=FlowSettings)
 
 
 def load_config(path: Path) -> AppConfig:  # Load configuration from disk

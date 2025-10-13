@@ -41,6 +41,7 @@ class InterviewRubricSnapshot(BaseModel):  # Stored interview rubric response
     interview_id: str
     job_title: str
     experience_years: str
+    job_description: str = ""
     rubrics: List[Rubric]
     status: str
 
@@ -157,7 +158,11 @@ class RubricStore:  # SQLite-backed rubric storage
         conn = self._connect()
         try:
             interview = conn.execute(
-                "SELECT job_title, experience_years, status FROM interview_ready WHERE interview_id = ?",
+                """
+                SELECT job_title, experience_years, status, job_description
+                FROM interview_ready
+                WHERE interview_id = ?
+                """,
                 (interview_id,)
             ).fetchone()
             if interview is None:
@@ -171,6 +176,7 @@ class RubricStore:  # SQLite-backed rubric storage
                 interview_id=interview_id,
                 job_title=interview["job_title"],
                 experience_years=interview["experience_years"],
+                job_description=interview["job_description"],
                 rubrics=rubrics,
                 status=interview["status"],
             )

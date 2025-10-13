@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "./ui/select";
 import type { InterviewAssignment } from "./InterviewerOverview";
+import type { SessionContextData, SessionMessage } from "../types/session";
 
 interface RubricAnchor {
   level: number;
@@ -62,7 +63,8 @@ interface InterviewRubricData {
 interface InterviewSessionPageProps {
   assignment: InterviewAssignment;
   rubric: InterviewRubricData;
-  messages: ChatMessage[];
+  messages: SessionMessage[];
+  context: SessionContextData | null;
   autoGenerateEnabled: boolean;
   autoAnswerEnabled: boolean;
   candidateReplyLevel: number;
@@ -80,30 +82,26 @@ interface InterviewSessionPageProps {
   sessionError: string | null;
 }
 
-interface ChatMessage {
-  id: string;
-  speaker: "Candidate" | "Interviewer" | "System";
-  content: string;
-  tone: "neutral" | "positive";
-}
-
 interface CriterionRow {
   competency: string;
   criterion: string;
   weight: number;
-  achievedLevel: 1 | 2 | 3 | 4 | 5;
-  rawScore: number;
+  covered: boolean;
+  targeted: boolean;
+  achievedLevel: number | null;
 }
 
 interface CompetencySummary {
   competency: string;
   score: number;
+  notes: string[];
 }
 
 export function InterviewSessionPage({
   assignment,
   rubric,
   messages,
+  context,
   autoGenerateEnabled,
   autoAnswerEnabled,
   candidateReplyLevel,
@@ -129,6 +127,14 @@ export function InterviewSessionPage({
     setLocalReplyLevel(candidateReplyLevel);
   }, [candidateReplyLevel]);
 
+  const clampLevel = (value: unknown): number | null => {  // Clamp numeric criterion level into rubric bounds
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      return null;
+    }
+    return Math.max(0, Math.min(5, Math.round(numeric)));
+  };
+
   const handleReplyLevelChange = useCallback(
     (value: string) => {
       if (!autoAnswerEnabled) {
@@ -147,11 +153,20 @@ export function InterviewSessionPage({
 
   const criteriaRows = useMemo<CriterionRow[]>(() => {
     const rows: CriterionRow[] = [];
+    const coverageMap = context?.competencyCovered ?? {};
+    const levelsMap = context?.competencyCriterionLevels ?? {};
+    const targetedSet = new Set(
+      (context?.targetedCriteria ?? []).map((item) => item.toLowerCase()),
+    );
     rubric.rubrics.forEach((entry) => {
       const competencyName = entry.competency.trim();
       if (!competencyName) {
         return;
       }
+      const coveredSet = new Set(
+        (coverageMap[competencyName] ?? []).map((item) => item.toLowerCase()),
+      );
+      const levelEntries = levelsMap[competencyName] ?? {};
       entry.criteria.forEach((criterion) => {
         const criterionName = criterion.name.trim();
         if (!criterionName) {
@@ -160,64 +175,152 @@ export function InterviewSessionPage({
         const weightValue = Number.isFinite(criterion.weight)
           ? Math.max(0, Math.round(criterion.weight * 1000) / 10)
           : 0;
+        const normalized = criterionName.toLowerCase();
+        let achievedLevel: number | null = null;
+        if (typeof levelEntries === 'object' && levelEntries !== null) {
+          const direct = clampLevel((levelEntries as Record<string, number>)[criterionName]);
+          if (direct !== null) {
+            achievedLevel = direct;
+          } else {
+            const fallbackKey = Object.keys(levelEntries).find(
+              (key) => key.toLowerCase() === normalized,
+            );
+            if (fallbackKey) {
+              const fallback = clampLevel((levelEntries as Record<string, number>)[fallbackKey]);
+              if (fallback !== null) {
+                achievedLevel = fallback;
+              }
+            }
+          }
+        }
         rows.push({
           competency: competencyName,
           criterion: criterionName,
           weight: weightValue,
-          achievedLevel: 1,
-          rawScore: 0,
+          covered: coveredSet.has(normalized),
+          targeted: targetedSet.has(normalized),
+          achievedLevel,
         });
       });
     });
     return rows;
-  }, [rubric]);
+  }, [context, rubric]);
 
   const competencyScores = useMemo<CompetencySummary[]>(() => {
-    const seen = new Set<string>();
-    const scores: CompetencySummary[] = [];
-    rubric.rubrics.forEach((entry) => {
-      const name = entry.competency.trim();
-      if (!name || seen.has(name)) {
+    const results: CompetencySummary[] = [];
+    const evaluatorScores = context?.evaluator?.scores ?? {};
+    const normalized = new Map<string, CompetencySummary>();
+    Object.values(evaluatorScores).forEach((entry) => {
+      if (!entry) {
         return;
       }
-      seen.add(name);
-      scores.push({ competency: name, score: 0 });
+      const name = entry.competency.trim();
+      if (!name) {
+        return;
+      }
+      const key = name.toLowerCase();
+      if (!normalized.has(key)) {
+        normalized.set(key, {
+          competency: name,
+          score: Number.isFinite(entry.score) ? entry.score : 0,
+          notes: entry.notes,
+        });
+      }
     });
-    return scores;
-  }, [rubric]);
+    rubric.rubrics.forEach((entry) => {
+      const name = entry.competency.trim();
+      if (!name) {
+        return;
+      }
+      const key = name.toLowerCase();
+      const snapshot = normalized.get(key);
+      if (snapshot) {
+        results.push(snapshot);
+        normalized.delete(key);
+      } else {
+        results.push({ competency: name, score: 0, notes: [] });
+      }
+    });
+    normalized.forEach((entry) => {
+      results.push(entry);
+    });
+    return results;
+  }, [context, rubric]);
 
-  const firstCriterion = criteriaRows[0];
-  const stageProgress = 0;
-  const stageName = firstCriterion ? `Focus: ${firstCriterion.criterion}` : "Scenario kickoff";
-  const activeCompetency = firstCriterion ? firstCriterion.competency : "—";
-  const questionsAsked = 0;
-  const timeElapsed = "00:00";
-  const overallScore = 0;
+  const activeCompetency = context?.competency ?? "—";
+  const totalCriteria = useMemo(() => {
+    if (!context?.competency) {
+      return 0;
+    }
+    return context.competencyCriteria[context.competency]?.length ?? 0;
+  }, [context]);
+  const coveredCriteria = useMemo(() => {
+    if (!context?.competency) {
+      return 0;
+    }
+    return context.competencyCovered[context.competency]?.length ?? 0;
+  }, [context]);
+  const stageProgress = useMemo(() => {
+    if (!context) {
+      return 0;
+    }
+    if (context.stage === "wrap_up") {
+      return 100;
+    }
+    if (context.stage === "competency" && context.competency) {
+      const total = context.competencyCriteria[context.competency]?.length ?? 0;
+      if (total > 0) {
+        const covered = context.competencyCovered[context.competency]?.length ?? 0;
+        return Math.min(100, Math.round((covered / total) * 100));
+      }
+      return Math.min(100, (context.competencyQuestionCounts[context.competency] ?? 0) * 20);
+    }
+    if (context.stage === "warmup") {
+      return context.questionIndex > 0 ? 100 : 0;
+    }
+    return 0;
+  }, [context]);
+  const stageName = useMemo(() => {
+    if (!context) {
+      return "Scenario kickoff";
+    }
+    if (context.stage === "warmup") {
+      return "Warmup";
+    }
+    if (context.stage === "competency") {
+      return context.competency ? `Competency: ${context.competency}` : "Competency";
+    }
+    if (context.stage === "wrap_up") {
+      return "Wrap-up";
+    }
+    return context.stage;
+  }, [context]);
+  const questionsAsked = useMemo(() => {
+    if (!context) {
+      return 0;
+    }
+    if (context.stage === "competency" && context.competency) {
+      return context.competencyQuestionCounts[context.competency] ?? 0;
+    }
+    return context.questionIndex;
+  }, [context]);
+  const targetedCriteria = context?.targetedCriteria ?? [];
+  const projectAnchor = context?.projectAnchor ?? "";
+  const coverageLabel = totalCriteria > 0 ? `${coveredCriteria}/${totalCriteria}` : "—";
+  const scoreValues = competencyScores
+    .map((entry) => entry.score)
+    .filter((value) => Number.isFinite(value));
+  const averageScore = scoreValues.length
+    ? scoreValues.reduce((sum, value) => sum + value, 0) / scoreValues.length
+    : 0;
+  const averageScoreLabel = scoreValues.length ? averageScore.toFixed(1) : "—";
+  const overallScoreLabel = averageScoreLabel;
 
   const formatWeight = (weight: number) => {
     if (Number.isInteger(weight)) {
       return `${weight}%`;
     }
     return `${weight.toFixed(1)}%`;
-  };
-
-  const renderLevelBadges = (achieved: CriterionRow["achievedLevel"]) => {
-    return (
-      <div className="flex flex-wrap gap-1">
-        {[1, 2, 3, 4, 5].map((level) => {
-          const isActive = level === achieved;
-          return (
-            <Badge
-              key={level}
-              variant={isActive ? "default" : "outline"}
-              className="px-2 py-0 text-xs"
-            >
-              Level {level}
-            </Badge>
-          );
-        })}
-      </div>
-    );
   };
 
   return (
@@ -285,6 +388,31 @@ export function InterviewSessionPage({
                         </Badge>
                       </div>
                       <p>{message.content}</p>
+                      {message.speaker === "Interviewer" ? (
+                        <div className="mt-2 space-y-1 text-xs text-slate-600">
+                          {message.competency ? (
+                            <div className="font-medium text-slate-700">
+                              Competency focus: {message.competency}
+                            </div>
+                          ) : null}
+                          {message.projectAnchor ? (
+                            <div>Anchor: {message.projectAnchor}</div>
+                          ) : null}
+                          {message.targetedCriteria.length > 0 ? (
+                            <div className="flex flex-wrap gap-1">
+                              {message.targetedCriteria.map((criterion) => (
+                                <Badge
+                                  key={criterion}
+                                  variant="outline"
+                                  className="px-2 py-0 text-[0.65rem]"
+                                >
+                                  {criterion}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -448,12 +576,16 @@ export function InterviewSessionPage({
                   value: activeCompetency,
                 },
                 {
+                  label: "Criteria covered",
+                  value: coverageLabel,
+                },
+                {
                   label: "Questions asked",
                   value: questionsAsked.toString(),
                 },
                 {
-                  label: "Time elapsed",
-                  value: timeElapsed,
+                  label: "Average score",
+                  value: averageScoreLabel,
                 },
               ].map((item) => (
                 <div
@@ -469,6 +601,28 @@ export function InterviewSessionPage({
                 </div>
               ))}
             </div>
+            {targetedCriteria.length > 0 ? (
+              <div className="space-y-1">
+                <p className="text-xs uppercase text-muted-foreground">
+                  Targeted criteria
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {targetedCriteria.map((criterion) => (
+                    <Badge key={criterion} variant="outline">
+                      {criterion}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {projectAnchor ? (
+              <div className="space-y-1">
+                <p className="text-xs uppercase text-muted-foreground">
+                  Project anchor
+                </p>
+                <p className="text-sm text-slate-700">{projectAnchor}</p>
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -476,7 +630,7 @@ export function InterviewSessionPage({
           <CardHeader>
             <CardTitle>Competency criteria scores</CardTitle>
             <CardDescription>
-              Live scoring per criterion with achieved level snapshots.
+              Coverage and focus per rubric criterion as the conversation progresses.
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
@@ -487,7 +641,8 @@ export function InterviewSessionPage({
                   <TableHead>Criterion</TableHead>
                   <TableHead>Weight</TableHead>
                   <TableHead>Achieved level</TableHead>
-                  <TableHead className="text-right">Raw score</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Targeted</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -501,10 +656,30 @@ export function InterviewSessionPage({
                     </TableCell>
                     <TableCell>{formatWeight(row.weight)}</TableCell>
                     <TableCell>
-                      {renderLevelBadges(row.achievedLevel)}
+                      {Number.isFinite(row.achievedLevel) && row.achievedLevel !== null ? (
+                        <Badge variant="secondary" className="px-2 py-0 text-xs">
+                          Level {row.achievedLevel}
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
-                    <TableCell className="text-right font-semibold">
-                      {row.rawScore.toFixed(1)}
+                    <TableCell>
+                      <Badge
+                        variant={row.covered ? "default" : "outline"}
+                        className="px-2 py-0 text-xs"
+                      >
+                        {row.covered ? "Covered" : "Pending"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {row.targeted ? (
+                        <Badge variant="secondary" className="px-2 py-0 text-xs">
+                          Target
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -517,7 +692,7 @@ export function InterviewSessionPage({
           <CardHeader>
             <CardTitle>Competency pillar scores</CardTitle>
             <CardDescription>
-              Aggregate scoring per competency pillar.
+              Aggregate scoring and evaluator notes per competency pillar.
             </CardDescription>
           </CardHeader>
           <CardContent className="p-0">
@@ -526,6 +701,7 @@ export function InterviewSessionPage({
                 <TableRow>
                   <TableHead>Competency pillar</TableHead>
                   <TableHead className="text-right">Score</TableHead>
+                  <TableHead>Notes</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -535,7 +711,20 @@ export function InterviewSessionPage({
                       {entry.competency}
                     </TableCell>
                     <TableCell className="text-right">
-                      <Badge variant="outline">{entry.score}</Badge>
+                      <Badge variant={entry.score > 0 ? "default" : "outline"}>
+                        {entry.score.toFixed(1)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {entry.notes.length > 0 ? (
+                        <ul className="list-disc pl-4 text-xs text-muted-foreground">
+                          {entry.notes.map((note) => (
+                            <li key={note}>{note}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No notes yet</span>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -558,7 +747,7 @@ export function InterviewSessionPage({
                   Current overall
                 </p>
                 <p className="text-5xl font-semibold text-slate-900">
-                  {overallScore}
+                  {overallScoreLabel}
                 </p>
               </div>
               <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-muted-foreground">

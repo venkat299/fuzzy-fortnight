@@ -70,7 +70,12 @@ class WarmupAgent:  # Agent responsible for producing the warmup prompt
             content=result.question.strip(),
             tone=tone,
         )
-        return FlowState(context=context, messages=state.messages + [message])
+        return state.model_copy(
+            update={
+                "context": context,
+                "messages": state.messages + [message],
+            }
+        )
 
 
 def _format_highlights(entries: Iterable[str]) -> str:  # Format highlighted experiences as bullet list

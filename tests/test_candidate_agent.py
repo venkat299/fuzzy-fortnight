@@ -46,7 +46,28 @@ def test_auto_reply_agent_uses_memory(monkeypatch) -> None:
     assert "Interviewer: Tell me about a time you led a migration." in captured["task"]
     assert "Candidate: I coordinated a data-center migration with zero downtime." in captured["task"]
     assert "Candidate reply depth level: 4" in captured["task"]
+    assert "Level 4 – The Architect" in captured["task"]
     assert outcome.message.answer.startswith("I recently automated")
     assert len(outcome.history) == 2
     assert outcome.history[-1].question.startswith("What customer problems")
     assert outcome.tone == "positive"
+
+
+def test_auto_reply_agent_clamps_level(monkeypatch) -> None:
+    route = _route()
+    captured: dict[str, str] = {}
+
+    def fake_call(task: str, schema, *, cfg) -> AutoReplyPlan:
+        captured["task"] = task
+        return AutoReplyPlan(answer="I am reflecting on an earlier project.")
+
+    monkeypatch.setattr("candidate_agent.auto_reply.call", fake_call)
+    context = AutoReplyContext(resume_summary="Platform engineer focused on observability.")
+    agent = AutoReplyAgent(route, AutoReplyPlan)
+    agent.invoke(
+        "Walk me through how you ensured reliability under pressure.",
+        memory=context,
+        level=-2,
+    )
+    assert "Level 1 – The Name-Dropper" in captured["task"]
+    assert "Candidate reply depth level: 1" in captured["task"]

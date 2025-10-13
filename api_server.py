@@ -3,7 +3,7 @@ from __future__ import annotations  # FastAPI server exposing competency analysi
 import logging
 import sqlite3
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,8 @@ from flow_manager import (
     advance_session_with_config,
     start_session_with_config,
 )
+from flow_manager.agents import prime_competencies_with_config
+from flow_manager.models import EvaluatorState
 from candidate_agent import AutoReplyOutcome, QuestionAnswer, auto_reply_with_config
 from rubric_design import (
     InterviewRubricSnapshot,
@@ -93,13 +95,28 @@ class SessionContext(BaseModel):  # Session context returned to UI
     resume_summary: str
     auto_answer_enabled: bool
     candidate_level: int
+    competency: Optional[str] = None
+    competency_index: int = Field(default=0, ge=0)
+    question_index: int = Field(default=0, ge=0)
+    project_anchor: str = ""
+    competency_projects: Dict[str, str] = Field(default_factory=dict)
+    competency_criteria: Dict[str, List[str]] = Field(default_factory=dict)
+    competency_covered: Dict[str, List[str]] = Field(default_factory=dict)
+    competency_criterion_levels: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    competency_question_counts: Dict[str, int] = Field(default_factory=dict)
+    competency_low_scores: Dict[str, int] = Field(default_factory=dict)
+    targeted_criteria: List[str] = Field(default_factory=list)
     qa_history: List[QuestionAnswer] = Field(default_factory=list)
+    evaluator: EvaluatorState = Field(default_factory=EvaluatorState)
 
 
 class SessionMessage(BaseModel):  # Chat message returned to UI
     speaker: str
     content: str
     tone: str
+    competency: Optional[str] = None
+    targeted_criteria: List[str] = Field(default_factory=list)
+    project_anchor: str = ""
 
 
 class StartSessionResponse(BaseModel):  # Combined context payload and rubric
@@ -118,6 +135,9 @@ class AutoReplyRequest(BaseModel):  # Candidate auto-reply generation payload
     question: str
     candidate_level: int = Field(default=3, ge=1, le=5)
     qa_history: List[QuestionAnswer] = Field(default_factory=list)
+    competency: Optional[str] = None
+    project_anchor: str = ""
+    targeted_criteria: List[str] = Field(default_factory=list)
 
 
 class CandidateReplyRequest(BaseModel):  # Candidate reply submission payload
@@ -129,6 +149,18 @@ class CandidateReplyRequest(BaseModel):  # Candidate reply submission payload
     auto_answer_enabled: bool = True
     candidate_level: int = Field(default=3, ge=1, le=5)
     qa_history: List[QuestionAnswer] = Field(default_factory=list)
+    evaluator: EvaluatorState = Field(default_factory=EvaluatorState)
+    competency: Optional[str] = None
+    competency_index: int = Field(default=0, ge=0)
+    question_index: int = Field(default=0, ge=0)
+    project_anchor: str = ""
+    competency_projects: Dict[str, str] = Field(default_factory=dict)
+    competency_criteria: Dict[str, List[str]] = Field(default_factory=dict)
+    competency_covered: Dict[str, List[str]] = Field(default_factory=dict)
+    competency_criterion_levels: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    competency_question_counts: Dict[str, int] = Field(default_factory=dict)
+    competency_low_scores: Dict[str, int] = Field(default_factory=dict)
+    targeted_criteria: List[str] = Field(default_factory=list)
 
 
 @app.post("/api/competency-matrix", response_model=CompetencyMatrixResponse)
@@ -228,23 +260,20 @@ def start_interview_session(
     snapshot, candidate, resume_summary, highlighted = _load_session_resources(
         interview_id, payload.candidate_id
     )
-    context = FlowContext(
-        interview_id=interview_id,
-        stage="warmup",
-        candidate_name=candidate.full_name,
-        job_title=snapshot.job_title,
-        resume_summary=resume_summary,
-        highlighted_experiences=highlighted,
+    projects = _prime_competency_projects(snapshot, resume_summary, highlighted)
+    flow_context = _build_flow_context(
+        interview_id,
+        snapshot,
+        candidate.full_name,
+        resume_summary,
+        highlighted,
+        projects,
     )
-    response_context = SessionContext(
-        stage=context.stage,
-        interview_id=context.interview_id,
-        candidate_name=context.candidate_name,
-        job_title=context.job_title,
-        resume_summary=context.resume_summary,
+    response_context = _session_context_from_flow(
+        flow_context,
         auto_answer_enabled=payload.auto_answer_enabled,
         candidate_level=payload.candidate_level,
-        qa_history=list(payload.qa_history),
+        qa_history=payload.qa_history,
     )
     return StartSessionResponse(
         context=response_context,
@@ -261,13 +290,14 @@ def begin_interview_warmup(
     snapshot, candidate, resume_summary, highlighted = _load_session_resources(
         interview_id, payload.candidate_id
     )
-    context = FlowContext(
-        interview_id=interview_id,
-        stage="warmup",
-        candidate_name=candidate.full_name,
-        job_title=snapshot.job_title,
-        resume_summary=resume_summary,
-        highlighted_experiences=highlighted,
+    projects = _prime_competency_projects(snapshot, resume_summary, highlighted)
+    context = _build_flow_context(
+        interview_id,
+        snapshot,
+        candidate.full_name,
+        resume_summary,
+        highlighted,
+        projects,
     )
     try:
         launch = start_session_with_config(context, config_path=CONFIG_PATH)
@@ -282,17 +312,16 @@ def begin_interview_warmup(
         SessionMessage(
             speaker=message.speaker,
             content=message.content,
-            tone=message.tone,
+            tone=_normalize_tone(message.tone),
+            competency=message.competency,
+            targeted_criteria=list(message.targeted_criteria),
+            project_anchor=message.project_anchor,
         )
         for message in launch.messages
     ]
     updated_history: List[QuestionAnswer] = list(payload.qa_history)
-    response_context = SessionContext(
-        stage=launch.context.stage,
-        interview_id=launch.context.interview_id,
-        candidate_name=launch.context.candidate_name,
-        job_title=launch.context.job_title,
-        resume_summary=launch.context.resume_summary,
+    response_context = _session_context_from_flow(
+        launch.context,
         auto_answer_enabled=payload.auto_answer_enabled,
         candidate_level=payload.candidate_level,
         qa_history=updated_history,
@@ -318,6 +347,9 @@ def generate_candidate_auto_reply(
             resume_summary=resume_summary,
             history=payload.qa_history,
             level=payload.candidate_level,
+            competency=payload.competency,
+            project_anchor=payload.project_anchor,
+            targeted_criteria=payload.targeted_criteria,
             config_path=CONFIG_PATH,
         )
     except LlmGatewayError as exc:
@@ -349,14 +381,17 @@ def submit_candidate_reply(
         speaker="Candidate",
         content=answer,
         tone=_normalize_tone(payload.tone),
+        competency=payload.competency,
+        targeted_criteria=list(payload.targeted_criteria),
+        project_anchor=payload.project_anchor,
     )
-    flow_context = FlowContext(
-        interview_id=interview_id,
-        stage=payload.stage,
-        candidate_name=candidate.full_name,
-        job_title=snapshot.job_title,
-        resume_summary=resume_summary,
-        highlighted_experiences=highlighted,
+    flow_context = _flow_context_from_payload(
+        interview_id,
+        snapshot,
+        candidate.full_name,
+        resume_summary,
+        highlighted,
+        payload,
     )
     history_turns = _qa_to_chat_turns(updated_history)
     try:
@@ -376,15 +411,14 @@ def submit_candidate_reply(
             speaker=turn.speaker,
             content=turn.content,
             tone=_normalize_tone(turn.tone),
+            competency=turn.competency,
+            targeted_criteria=list(turn.targeted_criteria),
+            project_anchor=turn.project_anchor,
         )
         for turn in flow_launch.messages
     ]
-    response_context = SessionContext(
-        stage=flow_launch.context.stage,
-        interview_id=flow_launch.context.interview_id,
-        candidate_name=flow_launch.context.candidate_name,
-        job_title=flow_launch.context.job_title,
-        resume_summary=flow_launch.context.resume_summary,
+    response_context = _session_context_from_flow(
+        flow_launch.context,
         auto_answer_enabled=payload.auto_answer_enabled,
         candidate_level=payload.candidate_level,
         qa_history=updated_history,
@@ -392,6 +426,194 @@ def submit_candidate_reply(
     return SessionAdvanceResponse(
         context=response_context,
         messages=[candidate_message, *follow_up_messages],
+    )
+
+
+def _prime_competency_projects(
+    snapshot: InterviewRubricSnapshot,
+    resume_summary: str,
+    highlighted: List[str],
+) -> Dict[str, str]:  # Prepare competency-to-project anchors
+    competencies = [rubric.competency for rubric in snapshot.rubrics]
+    if not competencies:
+        return {}
+    try:
+        return prime_competencies_with_config(
+            job_title=snapshot.job_title,
+            job_description=snapshot.job_description,
+            resume_summary=resume_summary,
+            experiences=highlighted,
+            competencies=competencies,
+            config_path=CONFIG_PATH,
+        )
+    except LlmGatewayError as exc:
+        logger.warning("Unable to prime competency projects, using defaults: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error while priming competency projects")
+    return {competency: "" for competency in competencies}
+
+
+def _build_flow_context(
+    interview_id: str,
+    snapshot: InterviewRubricSnapshot,
+    candidate_name: str,
+    resume_summary: str,
+    highlighted: List[str],
+    projects: Dict[str, str],
+) -> FlowContext:  # Construct initial flow context with competency metadata
+    competencies = [rubric.competency for rubric in snapshot.rubrics]
+    criteria_map = {
+        rubric.competency: [criterion.name for criterion in rubric.criteria]
+        for rubric in snapshot.rubrics
+    }
+    normalized_projects = {name: projects.get(name, "") for name in competencies}
+    coverage = {name: [] for name in competencies}
+    counts = {name: 0 for name in competencies}
+    low_scores = {name: 0 for name in competencies}
+    levels = {name: {} for name in competencies}
+    current = competencies[0] if competencies else None
+    anchor = normalized_projects.get(current, "") if current else ""
+    return FlowContext(
+        interview_id=interview_id,
+        stage="warmup",
+        candidate_name=candidate_name,
+        job_title=snapshot.job_title,
+        job_description=snapshot.job_description,
+        resume_summary=resume_summary,
+        highlighted_experiences=highlighted,
+        competency_pillars=competencies,
+        competency=current,
+        competency_index=0,
+        question_index=0,
+        project_anchor=anchor,
+        competency_projects=normalized_projects,
+        competency_criteria=criteria_map,
+        competency_covered=coverage,
+        competency_criterion_levels=levels,
+        competency_question_counts=counts,
+        competency_low_scores=low_scores,
+        targeted_criteria=[],
+        evaluator=EvaluatorState(),
+    )
+
+
+def _session_context_from_flow(
+    context: FlowContext,
+    *,
+    auto_answer_enabled: bool,
+    candidate_level: int,
+    qa_history: List[QuestionAnswer],
+) -> SessionContext:  # Convert flow context to API session context
+    def _normalize_level_map(source: Dict[str, int]) -> Dict[str, int]:
+        result: Dict[str, int] = {}
+        for name, raw in source.items():
+            key = str(name).strip()
+            if not key:
+                continue
+            try:
+                result[key] = int(raw)
+            except (TypeError, ValueError):
+                result[key] = 0
+        return result
+
+    return SessionContext(
+        stage=context.stage,
+        interview_id=context.interview_id,
+        candidate_name=context.candidate_name,
+        job_title=context.job_title,
+        resume_summary=context.resume_summary,
+        auto_answer_enabled=auto_answer_enabled,
+        candidate_level=candidate_level,
+        competency=context.competency,
+        competency_index=context.competency_index,
+        question_index=context.question_index,
+        project_anchor=context.project_anchor,
+        competency_projects=dict(context.competency_projects),
+        competency_criteria={key: list(value) for key, value in context.competency_criteria.items()},
+        competency_covered={key: list(value) for key, value in context.competency_covered.items()},
+        competency_criterion_levels={
+            key: _normalize_level_map(value) for key, value in context.competency_criterion_levels.items()
+        },
+        competency_question_counts=dict(context.competency_question_counts),
+        competency_low_scores=dict(context.competency_low_scores),
+        targeted_criteria=list(context.targeted_criteria),
+        qa_history=list(qa_history),
+        evaluator=context.evaluator,
+    )
+
+
+def _flow_context_from_payload(
+    interview_id: str,
+    snapshot: InterviewRubricSnapshot,
+    candidate_name: str,
+    resume_summary: str,
+    highlighted: List[str],
+    payload: CandidateReplyRequest,
+) -> FlowContext:  # Rebuild flow context from client payload
+    competencies = [rubric.competency for rubric in snapshot.rubrics]
+    criteria_map = {
+        rubric.competency: [criterion.name for criterion in rubric.criteria]
+        for rubric in snapshot.rubrics
+    }
+    projects = {name: "" for name in competencies}
+    projects.update(payload.competency_projects)
+    coverage = {name: list(payload.competency_covered.get(name, [])) for name in competencies}
+    counts = {name: payload.competency_question_counts.get(name, 0) for name in competencies}
+    low_scores = {name: payload.competency_low_scores.get(name, 0) for name in competencies}
+    levels: Dict[str, Dict[str, int]] = {}
+    for name in competencies:
+        source = payload.competency_criterion_levels.get(name, {}) or {}
+        mapped: Dict[str, int] = {}
+        for inner_name, raw_value in source.items():
+            key = str(inner_name).strip()
+            if not key:
+                continue
+            try:
+                mapped[key] = int(raw_value)
+            except (TypeError, ValueError):
+                mapped[key] = 0
+        levels[name] = mapped
+    index = min(payload.competency_index, max(len(competencies) - 1, 0)) if competencies else 0
+    current = payload.competency or (competencies[index] if competencies else None)
+    if current is not None:
+        projects[current] = payload.project_anchor or projects.get(current, "")
+        coverage.setdefault(current, list(payload.competency_covered.get(current, [])))
+        counts.setdefault(current, payload.question_index)
+        low_scores.setdefault(current, payload.competency_low_scores.get(current, 0))
+        if current not in levels:
+            source = payload.competency_criterion_levels.get(current, {}) or {}
+            mapped: Dict[str, int] = {}
+            for key, raw_value in source.items():
+                name_key = str(key).strip()
+                if not name_key:
+                    continue
+                try:
+                    mapped[name_key] = int(raw_value)
+                except (TypeError, ValueError):
+                    mapped[name_key] = 0
+            levels[current] = mapped
+    anchor = payload.project_anchor or (projects.get(current, "") if current else "")
+    return FlowContext(
+        interview_id=interview_id,
+        stage=payload.stage,
+        candidate_name=candidate_name,
+        job_title=snapshot.job_title,
+        job_description=snapshot.job_description,
+        resume_summary=resume_summary,
+        highlighted_experiences=highlighted,
+        competency_pillars=competencies,
+        competency=current,
+        competency_index=index,
+        question_index=payload.question_index,
+        project_anchor=anchor,
+        competency_projects=projects,
+        competency_criteria=criteria_map,
+        competency_covered=coverage,
+        competency_criterion_levels=levels,
+        competency_question_counts=counts,
+        competency_low_scores=low_scores,
+        targeted_criteria=list(payload.targeted_criteria),
+        evaluator=payload.evaluator,
     )
 
 

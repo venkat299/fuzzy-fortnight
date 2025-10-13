@@ -115,6 +115,7 @@ def test_design_rubrics_generates_and_persists(monkeypatch, tmp_path) -> None:
     snapshot = store.load(interview_id)
     assert snapshot.job_title == "Staff Engineer"
     assert snapshot.experience_years == "7-10"
+    assert snapshot.job_description == "Detailed JD"
     assert len(snapshot.rubrics) == len(area_names)
     assert {rubric_obj.competency for rubric_obj in snapshot.rubrics} == set(area_names)
 

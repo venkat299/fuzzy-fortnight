@@ -25,6 +25,14 @@
     "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
     "rubric_design.generate_rubric": "qwen3-4b-local",
     "flow_manager.warmup_agent": "qwen3-4b-local",
-    "candidate_agent.auto_reply": "qwen3-4b-local"
+    "flow_manager.competency_primer": "qwen3-4b-local",
+    "flow_manager.competency_agent": "qwen3-4b-local",
+    "candidate_agent.auto_reply": "qwen3-4b-local",
+    "flow_manager.evaluator_agent": "qwen3-4b-local"
+  },
+  "flow": {
+    "warmup_questions": 1,
+    "max_competency_followups": 3,
+    "low_score_threshold": 2.5
   }
 }
