@@ -73,7 +73,7 @@ def test_start_session_endpoint_returns_context_without_messages(monkeypatch, tm
     payload = response.json()
     assert payload["context"]["candidate_name"] == "Jordan Blake"
     assert payload["context"]["stage"] == "warmup"
-    assert payload["context"]["auto_answer_enabled"] is False
+    assert payload["context"]["auto_answer_enabled"] is True
     assert payload["context"]["candidate_level"] == 3
     assert payload["context"]["qa_history"] == []
     assert payload["messages"] == []
@@ -141,7 +141,7 @@ def test_begin_warmup_endpoint_returns_question(monkeypatch, tmp_path) -> None:
     assert payload["context"]["qa_history"] == []
 
 
-def test_begin_warmup_endpoint_appends_candidate_reply(monkeypatch, tmp_path) -> None:
+def test_begin_warmup_endpoint_does_not_append_candidate_reply(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "interviews.sqlite"
     rubric_store = RubricStore(db_path)
     interview_id = "session-3"
@@ -182,29 +182,13 @@ def test_begin_warmup_endpoint_appends_candidate_reply(monkeypatch, tmp_path) ->
     def fake_start_session(context, *, config_path):
         return fake_launch
 
-    def fake_auto_reply(question, *, resume_summary, history, level, config_path):
-        assert question.startswith("To kick")
-        assert "Seasoned engineer" in resume_summary
-        assert history == []
-        assert level == 4
-        return AutoReplyOutcome(
-            message=QuestionAnswer(
-                question=question,
-                answer="I've been proud of leading the incident response automation rollout.",
-            ),
-            tone="positive",
-            history=[
-                QuestionAnswer(
-                    question=question,
-                    answer="I've been proud of leading the incident response automation rollout.",
-                )
-            ],
-        )
+    def fail_auto_reply(*args, **kwargs):  # pragma: no cover - should not run
+        raise AssertionError("auto_reply_with_config should not be called during warmup")
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
     monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(api_server, "start_session_with_config", fake_start_session)
-    monkeypatch.setattr(api_server, "auto_reply_with_config", fake_auto_reply)
+    monkeypatch.setattr(api_server, "auto_reply_with_config", fail_auto_reply)
 
     client = TestClient(api_server.app)
     response = client.post(
@@ -217,8 +201,145 @@ def test_begin_warmup_endpoint_appends_candidate_reply(monkeypatch, tmp_path) ->
     )
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload["messages"]) == 2
-    assert payload["messages"][1]["speaker"] == "Candidate"
-    assert payload["messages"][1]["content"].startswith("I've been proud")
-    assert payload["context"]["qa_history"][0]["answer"].startswith("I've been proud")
+    assert len(payload["messages"]) == 1
+    assert payload["messages"][0]["speaker"] == "Interviewer"
+    assert payload["context"]["qa_history"] == []
     assert payload["context"]["candidate_level"] == 4
+
+
+def test_generate_candidate_auto_reply_returns_plan(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "interviews.sqlite"
+    rubric_store = RubricStore(db_path)
+    interview_id = "session-4"
+    rubric_store.save(
+        interview_id=interview_id,
+        job_title="Staff Engineer",
+        experience_years="7-10",
+        job_description="Owns distributed systems",
+        rubrics=[_rubric()],
+    )
+    candidate_store = CandidateStore(db_path)
+    candidate = candidate_store.create_candidate(
+        full_name="Jordan Blake",
+        resume="Seasoned engineer who builds resilient services and collaborates deeply with design.",
+        interview_id=interview_id,
+        status="scheduled",
+    )
+    candidate_id = candidate.candidate_id
+
+    history = [
+        QuestionAnswer(
+            question="Tell me about a recent success.",
+            answer="I led the migration to a service mesh.",
+        )
+    ]
+
+    def fake_auto_reply(question, *, resume_summary, history, level, config_path):
+        assert "Seasoned engineer" in resume_summary
+        assert level == 4
+        assert len(history) == 1
+        return AutoReplyOutcome(
+            message=QuestionAnswer(
+                question=question,
+                answer="I drove the incident response automation rollout with cross-team partners.",
+            ),
+            tone="positive",
+            history=history
+            + [
+                QuestionAnswer(
+                    question=question,
+                    answer="I drove the incident response automation rollout with cross-team partners.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(api_server, "DATA_PATH", db_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(api_server, "auto_reply_with_config", fake_auto_reply)
+
+    client = TestClient(api_server.app)
+    response = client.post(
+        f"/api/interviews/{interview_id}/session/auto-reply",
+        json={
+            "candidate_id": candidate_id,
+            "question": "How do you keep stakeholders aligned?",
+            "qa_history": [entry.model_dump() for entry in history],
+            "candidate_level": 4,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["tone"] == "positive"
+    assert payload["message"]["answer"].startswith("I drove the incident response automation rollout")
+
+
+def test_submit_candidate_reply_returns_follow_up(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "interviews.sqlite"
+    rubric_store = RubricStore(db_path)
+    interview_id = "session-5"
+    rubric_store.save(
+        interview_id=interview_id,
+        job_title="Staff Engineer",
+        experience_years="7-10",
+        job_description="Owns distributed systems",
+        rubrics=[_rubric()],
+    )
+    candidate_store = CandidateStore(db_path)
+    candidate = candidate_store.create_candidate(
+        full_name="Jordan Blake",
+        resume="Seasoned engineer who builds resilient services and collaborates deeply with design.",
+        interview_id=interview_id,
+        status="scheduled",
+    )
+    candidate_id = candidate.candidate_id
+
+    captured_history: list[ChatTurn] = []
+
+    def fake_advance_session(context, history, *, config_path):
+        nonlocal captured_history
+        captured_history = history
+        return SessionLaunch(
+            context=context,
+            messages=[
+                ChatTurn(
+                    speaker="Interviewer",
+                    content="Great context. Could you walk me through your stakeholder rhythm?",
+                    tone="neutral",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(api_server, "DATA_PATH", db_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(api_server, "advance_session_with_config", fake_advance_session)
+
+    prior_history = [
+        {
+            "question": "Tell me about a recent success.",
+            "answer": "I led the migration to a service mesh.",
+        }
+    ]
+
+    client = TestClient(api_server.app)
+    response = client.post(
+        f"/api/interviews/{interview_id}/session/reply",
+        json={
+            "candidate_id": candidate_id,
+            "question": "How do you keep stakeholders aligned?",
+            "answer": "I schedule recurring alignment forums with clear agendas and shared artifacts.",
+            "tone": "positive",
+            "stage": "warmup",
+            "auto_answer_enabled": True,
+            "candidate_level": 5,
+            "qa_history": prior_history,
+        },
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][0]["speaker"] == "Candidate"
+    assert payload["messages"][0]["tone"] == "positive"
+    assert payload["messages"][1]["speaker"] == "Interviewer"
+    assert payload["context"]["qa_history"][-1]["answer"].startswith("I schedule recurring alignment forums")
+    assert payload["context"]["candidate_level"] == 5
+    assert len(captured_history) == 4
+    assert captured_history[-1].speaker == "Candidate"

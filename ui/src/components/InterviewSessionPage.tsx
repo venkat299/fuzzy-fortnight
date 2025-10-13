@@ -63,10 +63,17 @@ interface InterviewSessionPageProps {
   assignment: InterviewAssignment;
   rubric: InterviewRubricData;
   messages: ChatMessage[];
+  autoGenerateEnabled: boolean;
   autoAnswerEnabled: boolean;
   candidateReplyLevel: number;
+  draftMessage: string;
+  isGeneratingDraft: boolean;
+  isSendingDraft: boolean;
+  onAutoGenerateToggle: (enabled: boolean) => void;
   onAutoAnswerToggle: (enabled: boolean) => void;
   onCandidateReplyLevelChange: (level: number) => void;
+  onDraftChange: (value: string) => void;
+  onSendCandidateReply: () => void;
   onBackToDashboard: () => void;
   onStartInterview: () => Promise<void>;
   isStarting: boolean;
@@ -97,16 +104,22 @@ export function InterviewSessionPage({
   assignment,
   rubric,
   messages,
+  autoGenerateEnabled,
   autoAnswerEnabled,
   candidateReplyLevel,
+  draftMessage,
+  isGeneratingDraft,
+  isSendingDraft,
+  onAutoGenerateToggle,
   onAutoAnswerToggle,
   onCandidateReplyLevelChange,
+  onDraftChange,
+  onSendCandidateReply,
   onBackToDashboard,
   onStartInterview,
   isStarting,
   sessionError,
 }: InterviewSessionPageProps) {
-  const [autoGenerate, setAutoGenerate] = useState(true);
   const [localReplyLevel, setLocalReplyLevel] = useState(candidateReplyLevel);
   const chatMessages = useMemo(() => messages, [messages]);
   const hasStarted = chatMessages.length > 0;
@@ -115,10 +128,6 @@ export function InterviewSessionPage({
   useEffect(() => {
     setLocalReplyLevel(candidateReplyLevel);
   }, [candidateReplyLevel]);
-
-  const handleAutoGenerateToggle = useCallback(() => {
-    setAutoGenerate((previous) => !previous);
-  }, []);
 
   const handleReplyLevelChange = useCallback(
     (value: string) => {
@@ -287,14 +296,25 @@ export function InterviewSessionPage({
                 placeholder="Draft prompts, capture coaching notes, or summarize key evidence..."
                 className="flex-1"
                 rows={4}
+                value={draftMessage}
+                onChange={(event) => {
+                  onDraftChange(event.target.value);
+                }}
+                disabled={isGeneratingDraft}
               />
               <Button
                 type="button"
                 className="lg:h-full lg:min-w-[9rem]"
                 variant="secondary"
+                onClick={() => {
+                  onSendCandidateReply();
+                }}
+                disabled={
+                  isSendingDraft || isGeneratingDraft || draftMessage.trim().length === 0
+                }
               >
                 <Send className="h-4 w-4" />
-                Send
+                {isSendingDraft ? "Sending..." : "Send"}
               </Button>
             </div>
 
@@ -335,16 +355,22 @@ export function InterviewSessionPage({
                     Auto-generate
                   </Label>
                   <p className="text-xs text-muted-foreground">
-                    {autoGenerate ? "Enabled" : "Disabled"}
+                    {autoGenerateEnabled
+                      ? isGeneratingDraft
+                        ? "Generating..."
+                        : "Enabled"
+                      : "Disabled"}
                   </p>
                 </div>
                 <Button
                   type="button"
                   size="sm"
-                  variant={autoGenerate ? "default" : "outline"}
-                  onClick={handleAutoGenerateToggle}
+                  variant={autoGenerateEnabled ? "default" : "outline"}
+                  onClick={() => {
+                    onAutoGenerateToggle(!autoGenerateEnabled);
+                  }}
                 >
-                  {autoGenerate ? "Disable" : "Enable"}
+                  {autoGenerateEnabled ? "Disable" : "Enable"}
                 </Button>
               </div>
               <div className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">

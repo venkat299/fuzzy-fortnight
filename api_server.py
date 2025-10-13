@@ -13,8 +13,13 @@ from jd_analysis import CompetencyMatrix, JobProfile, analyze_with_config
 from llm_gateway import LlmGatewayError
 
 from candidate_management import CandidateRecord, CandidateStore
-from flow_manager import InterviewContext as FlowContext, start_session_with_config
-from candidate_agent import QuestionAnswer, auto_reply_with_config
+from flow_manager import (
+    ChatTurn,
+    InterviewContext as FlowContext,
+    advance_session_with_config,
+    start_session_with_config,
+)
+from candidate_agent import AutoReplyOutcome, QuestionAnswer, auto_reply_with_config
 from rubric_design import (
     InterviewRubricSnapshot,
     RubricStore,
@@ -75,7 +80,7 @@ class CreateCandidateRequest(BaseModel):  # Candidate creation payload
 
 class StartSessionRequest(BaseModel):  # Start interview session payload
     candidate_id: str
-    auto_answer_enabled: bool = False
+    auto_answer_enabled: bool = True
     candidate_level: int = Field(default=3, ge=1, le=5)
     qa_history: List[QuestionAnswer] = Field(default_factory=list)
 
@@ -106,6 +111,24 @@ class StartSessionResponse(BaseModel):  # Combined context payload and rubric
 class SessionAdvanceResponse(BaseModel):  # Warmup payload returned after start
     context: SessionContext
     messages: List[SessionMessage]
+
+
+class AutoReplyRequest(BaseModel):  # Candidate auto-reply generation payload
+    candidate_id: str
+    question: str
+    candidate_level: int = Field(default=3, ge=1, le=5)
+    qa_history: List[QuestionAnswer] = Field(default_factory=list)
+
+
+class CandidateReplyRequest(BaseModel):  # Candidate reply submission payload
+    candidate_id: str
+    question: str
+    answer: str
+    tone: str = "neutral"
+    stage: str = "warmup"
+    auto_answer_enabled: bool = True
+    candidate_level: int = Field(default=3, ge=1, le=5)
+    qa_history: List[QuestionAnswer] = Field(default_factory=list)
 
 
 @app.post("/api/competency-matrix", response_model=CompetencyMatrixResponse)
@@ -264,38 +287,6 @@ def begin_interview_warmup(
         for message in launch.messages
     ]
     updated_history: List[QuestionAnswer] = list(payload.qa_history)
-    if payload.auto_answer_enabled:
-        interviewer_turn = next(
-            (
-                turn
-                for turn in reversed(launch.messages)
-                if turn.speaker.lower() == "interviewer" and turn.content.strip()
-            ),
-            None,
-        )
-        if interviewer_turn is not None:
-            try:
-                outcome = auto_reply_with_config(
-                    interviewer_turn.content,
-                    resume_summary=resume_summary,
-                    history=updated_history,
-                    level=payload.candidate_level,
-                    config_path=CONFIG_PATH,
-                )
-            except LlmGatewayError as exc:
-                logger.exception("Candidate auto-answer failed")
-                raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Unexpected error during candidate auto-answer")
-                raise HTTPException(status_code=500, detail="Unable to generate candidate reply") from exc
-            updated_history = outcome.history
-            response_messages.append(
-                SessionMessage(
-                    speaker="Candidate",
-                    content=outcome.message.answer,
-                    tone=outcome.tone,
-                )
-            )
     response_context = SessionContext(
         stage=launch.context.stage,
         interview_id=launch.context.interview_id,
@@ -312,6 +303,98 @@ def begin_interview_warmup(
     )
 
 
+@app.post("/api/interviews/{interview_id}/session/auto-reply", response_model=AutoReplyOutcome)
+def generate_candidate_auto_reply(
+    interview_id: str,
+    payload: AutoReplyRequest,
+) -> AutoReplyOutcome:  # Generate draft candidate reply for the latest interviewer question
+    _, _, resume_summary, _ = _load_session_resources(interview_id, payload.candidate_id)
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question text is required.")
+    try:
+        return auto_reply_with_config(
+            question,
+            resume_summary=resume_summary,
+            history=payload.qa_history,
+            level=payload.candidate_level,
+            config_path=CONFIG_PATH,
+        )
+    except LlmGatewayError as exc:
+        logger.exception("Candidate auto-reply generation failed")
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error during candidate auto-reply generation")
+        raise HTTPException(status_code=500, detail="Unable to generate candidate reply") from exc
+
+
+@app.post("/api/interviews/{interview_id}/session/reply", response_model=SessionAdvanceResponse)
+def submit_candidate_reply(
+    interview_id: str,
+    payload: CandidateReplyRequest,
+) -> SessionAdvanceResponse:  # Persist candidate reply and advance the flow
+    snapshot, candidate, resume_summary, highlighted = _load_session_resources(
+        interview_id, payload.candidate_id
+    )
+    question = payload.question.strip()
+    answer = payload.answer.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question text is required.")
+    if not answer:
+        raise HTTPException(status_code=400, detail="Candidate answer is required.")
+    updated_history: List[QuestionAnswer] = list(payload.qa_history) + [
+        QuestionAnswer(question=question, answer=answer)
+    ]
+    candidate_message = SessionMessage(
+        speaker="Candidate",
+        content=answer,
+        tone=_normalize_tone(payload.tone),
+    )
+    flow_context = FlowContext(
+        interview_id=interview_id,
+        stage=payload.stage,
+        candidate_name=candidate.full_name,
+        job_title=snapshot.job_title,
+        resume_summary=resume_summary,
+        highlighted_experiences=highlighted,
+    )
+    history_turns = _qa_to_chat_turns(updated_history)
+    try:
+        flow_launch = advance_session_with_config(
+            flow_context,
+            history_turns,
+            config_path=CONFIG_PATH,
+        )
+    except LlmGatewayError as exc:
+        logger.exception("Flow agent failed after candidate reply")
+        raise HTTPException(status_code=502, detail=f"LLM request failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Unexpected error while advancing session")
+        raise HTTPException(status_code=500, detail="Unable to advance session") from exc
+    follow_up_messages = [
+        SessionMessage(
+            speaker=turn.speaker,
+            content=turn.content,
+            tone=_normalize_tone(turn.tone),
+        )
+        for turn in flow_launch.messages
+    ]
+    response_context = SessionContext(
+        stage=flow_launch.context.stage,
+        interview_id=flow_launch.context.interview_id,
+        candidate_name=flow_launch.context.candidate_name,
+        job_title=flow_launch.context.job_title,
+        resume_summary=flow_launch.context.resume_summary,
+        auto_answer_enabled=payload.auto_answer_enabled,
+        candidate_level=payload.candidate_level,
+        qa_history=updated_history,
+    )
+    return SessionAdvanceResponse(
+        context=response_context,
+        messages=[candidate_message, *follow_up_messages],
+    )
+
+
 def _collect_highlights(snapshot: InterviewRubricSnapshot, limit: int = 6) -> List[str]:  # Pull notable evidence lines
     highlights: List[str] = []
     for rubric in snapshot.rubrics:
@@ -319,6 +402,18 @@ def _collect_highlights(snapshot: InterviewRubricSnapshot, limit: int = 6) -> Li
         if len(highlights) >= limit:
             break
     return highlights
+
+
+def _qa_to_chat_turns(history: List[QuestionAnswer]) -> List[ChatTurn]:  # Convert QA history into flow chat turns
+    turns: List[ChatTurn] = []
+    for entry in history:
+        question = entry.question.strip()
+        answer = entry.answer.strip()
+        if question:
+            turns.append(ChatTurn(speaker="Interviewer", content=question, tone="neutral"))
+        if answer:
+            turns.append(ChatTurn(speaker="Candidate", content=answer, tone="neutral"))
+    return turns
 
 
 def _load_session_resources(
@@ -357,3 +452,8 @@ def _summarize_resume(resume: str, limit: int = 600) -> str:  # Compact resume t
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _normalize_tone(value: str) -> str:  # Clamp tone metadata for chat messages
+    normalized = (value or "").strip().lower()
+    return "positive" if normalized == "positive" else "neutral"

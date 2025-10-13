@@ -1,7 +1,7 @@
 from __future__ import annotations  # Interview flow orchestration using LangGraph
 
 from pathlib import Path
-from typing import Any, Dict, Tuple, Type
+from typing import Any, Dict, List, Tuple, Type
 
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel
@@ -47,6 +47,32 @@ def start_session_with_config(
     return start_session(context, registry=registry)
 
 
+def advance_session(
+    context: InterviewContext,
+    history: List[ChatTurn],
+    *,
+    registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]],
+) -> SessionLaunch:  # Produce next flow turn given accumulated history
+    state = FlowState(context=context, messages=list(history))
+    agent = _warmup_agent(registry)
+    updated = agent.invoke(state)
+    existing = len(history)
+    if existing >= len(updated.messages):
+        return SessionLaunch(context=updated.context, messages=[])
+    return SessionLaunch(context=updated.context, messages=updated.messages[existing:])
+
+
+def advance_session_with_config(
+    context: InterviewContext,
+    history: List[ChatTurn],
+    *,
+    config_path: Path,
+) -> SessionLaunch:  # Convenience helper for advancing the flow using config file
+    schemas: Dict[str, Type[BaseModel]] = {WARMUP_AGENT_KEY: WarmupPlan}
+    registry = load_app_registry(config_path, schemas)
+    return advance_session(context, history, registry=registry)
+
+
 def _warmup_agent(registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]]) -> WarmupAgent:  # Build warmup agent from registry
     if WARMUP_AGENT_KEY not in registry:
         raise KeyError(f"Registry missing {WARMUP_AGENT_KEY}")
@@ -75,6 +101,8 @@ def _ensure_state(payload: FlowState | Dict[str, Any]) -> FlowState:  # Normaliz
 
 
 __all__ = [
+    "advance_session",
+    "advance_session_with_config",
     "ChatTurn",
     "InterviewContext",
     "SessionLaunch",

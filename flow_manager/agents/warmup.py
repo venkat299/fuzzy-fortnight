@@ -1,7 +1,7 @@
 from __future__ import annotations  # Warmup agent generating rapport-building prompts
 
 from textwrap import dedent
-from typing import Iterable, List, Type
+from typing import Iterable, List, Sequence, Type
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
@@ -43,6 +43,7 @@ class WarmupAgent:  # Agent responsible for producing the warmup prompt
                         "Candidate: {candidate_name}\n"
                         "Resume Summary:\n{resume_summary}\n"
                         "Highlighted Experiences:\n{highlighted_experiences}\n\n"
+                        "Conversation so far:\n{conversation_history}\n\n"
                         "Produce a single conversational warmup question and set tone metadata."
                     ),
                 ),
@@ -58,6 +59,7 @@ class WarmupAgent:  # Agent responsible for producing the warmup prompt
             candidate_name=context.candidate_name,
             resume_summary=_format_resume(context.resume_summary),
             highlighted_experiences=_format_highlights(context.highlighted_experiences),
+            conversation_history=_format_conversation(state.messages),
         )
         result = call(task, self._schema, cfg=self._route)
         tone = (result.tone or "positive").strip().lower()
@@ -83,6 +85,17 @@ def _format_resume(summary: str, limit: int = 600) -> str:  # Clamp resume summa
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _format_conversation(messages: Sequence[ChatTurn]) -> str:  # Summarize existing conversation for warmup agent
+    if not messages:
+        return "(none)"
+    lines: List[str] = []
+    for turn in messages:
+        speaker = turn.speaker.strip() or "Unknown"
+        content = turn.content.strip() or "(no content)"
+        lines.append(f"{speaker}: {content}")
+    return "\n".join(lines)
 
 
 __all__ = [
