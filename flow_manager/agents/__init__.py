@@ -18,6 +18,12 @@ from .evaluator import (
     EvaluationPlan,
     EvaluatorAgent,
 )
+from .persona import (
+    PERSONA_AGENT_KEY,
+    PERSONA_GUIDANCE,
+    PersonaAgent,
+    PersonaQuestion,
+)
 from .warmup import WARMUP_AGENT_KEY, WARMUP_GUIDANCE, WarmupAgent, WarmupPlan
 
 __all__ = [
@@ -33,6 +39,10 @@ __all__ = [
     "EvaluationPlan",
     "EvaluatorAgent",
     "prime_competencies_with_config",
+    "PERSONA_AGENT_KEY",
+    "PERSONA_GUIDANCE",
+    "PersonaAgent",
+    "PersonaQuestion",
     "WARMUP_AGENT_KEY",
     "WARMUP_GUIDANCE",
     "WarmupAgent",

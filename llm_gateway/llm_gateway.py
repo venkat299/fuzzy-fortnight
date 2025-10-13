@@ -51,12 +51,12 @@ def _lock_for(cfg: LlmRoute) -> threading.Lock:
 
 def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClient] = None) -> T:  # Invoke configured LLM route and validate output
     def _execute() -> T:
-        schema_json = json.dumps(schema.model_json_schema(), indent=2)
-        system_prompt = "Reply with a single JSON object matching this schema:\n" + schema_json
-        base_messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": task},
-        ]
+        base_messages = []
+        if cfg.enforce_json:
+            schema_json = json.dumps(schema.model_json_schema(), indent=2)
+            system_prompt = "Reply with a single JSON object matching this schema:\n" + schema_json
+            base_messages.append({"role": "system", "content": system_prompt})
+        base_messages.append({"role": "user", "content": task})
         attempts = cfg.max_retries + 1
         last_error: Optional[Exception] = None
         last_error_text: Optional[str] = None
@@ -76,7 +76,7 @@ def call(task: str, schema: Type[T], *, cfg: LlmRoute, client: Optional[HttpClie
                 messages.append(
                     {
                         "role": "system",
-                        "content": _retry_hint(last_error_text),
+                        "content": _retry_hint(last_error_text, cfg.enforce_json),
                     }
                 )
             payload: Dict[str, Any] = {"model": cfg.model, "messages": messages}
@@ -199,13 +199,13 @@ def _strip_code_fences(content: str) -> str:  # Remove common markdown fences fr
     return text
 
 
-def _retry_hint(error_text: Optional[str]) -> str:  # Compose retry instructions including last error
-    if not error_text:
-        return "The previous reply failed validation. Return valid JSON only."
-    truncated = error_text.splitlines()[0].strip()
-    if len(truncated) > 200:
-        truncated = truncated[:197] + "..."
-    return (
-        "The previous reply failed validation. Reason: "
-        f"{truncated}. Return valid JSON only."
-    )
+def _retry_hint(error_text: Optional[str], enforce_json: bool) -> str:  # Compose retry instructions including last error
+    base = "The previous reply failed validation."
+    if error_text:
+        truncated = error_text.splitlines()[0].strip()
+        if len(truncated) > 200:
+            truncated = truncated[:197] + "..."
+        base += f" Reason: {truncated}."
+    if enforce_json:
+        return base + " Return a single JSON object that matches the schema."
+    return base + " Follow the requested format precisely."

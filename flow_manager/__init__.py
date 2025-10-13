@@ -14,6 +14,9 @@ from .agents import (
     EVALUATOR_AGENT_KEY,
     EvaluationPlan,
     EvaluatorAgent,
+    PERSONA_AGENT_KEY,
+    PersonaAgent,
+    PersonaQuestion,
     WARMUP_AGENT_KEY,
     WarmupAgent,
     WarmupPlan,
@@ -34,7 +37,7 @@ def start_session(
     registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]],
     settings: FlowSettings,
 ) -> SessionLaunch:  # Run the warmup stage for a new session
-    warmup_agent = _warmup_agent(registry)
+    warmup_agent = _warmup_agent(registry, enable_persona=settings.persona_enabled)
     _evaluator_agent(registry)  # Ensure evaluator is configured before launch
     seeded_context = _seed_competency_context(context)
     progress = FlowProgress(
@@ -49,7 +52,11 @@ def start_session(
     graph.add_node("router", _identity)
     graph.add_node(
         "warmup",
-        lambda payload: _run_warmup(warmup_agent, settings, _ensure_state(payload)).model_dump(),
+        lambda payload: _run_warmup(
+            warmup_agent,
+            settings,
+            _ensure_state(payload),
+        ).model_dump(),
     )
     graph.add_edge("warmup", END)
     graph.add_conditional_edges(
@@ -75,6 +82,7 @@ def start_session_with_config(
         WARMUP_AGENT_KEY: WarmupPlan,
         COMPETENCY_AGENT_KEY: CompetencyPlan,
         EVALUATOR_AGENT_KEY: EvaluationPlan,
+        PERSONA_AGENT_KEY: PersonaQuestion,
     }
     registry = resolve_registry(cfg, schemas)
     return start_session(context, registry=registry, settings=cfg.flow)
@@ -88,7 +96,7 @@ def advance_session(
     settings: FlowSettings,
 ) -> SessionLaunch:  # Evaluate latest answer and progress stages
     evaluator = _evaluator_agent(registry)
-    competency_agent = _competency_agent(registry)
+    competency_agent = _competency_agent(registry, enable_persona=settings.persona_enabled)
     warmup_limit = max(settings.warmup_questions, 0)
     progress = FlowProgress(
         warmup_limit=warmup_limit,
@@ -149,13 +157,14 @@ def advance_session_with_config(
         WARMUP_AGENT_KEY: WarmupPlan,
         COMPETENCY_AGENT_KEY: CompetencyPlan,
         EVALUATOR_AGENT_KEY: EvaluationPlan,
+        PERSONA_AGENT_KEY: PersonaQuestion,
     }
     registry = resolve_registry(cfg, schemas)
     return advance_session(context, history, registry=registry, settings=cfg.flow)
 
 
 def _run_warmup(agent: WarmupAgent, settings: FlowSettings, state: FlowState) -> FlowState:  # Execute warmup node
-    updated = agent.invoke(state)
+    updated = agent.invoke(state, use_persona=settings.persona_enabled)
     asked = state.progress.warmup_asked + 1
     limit = max(settings.warmup_questions, 0)
     progress = state.progress.model_copy(
@@ -284,7 +293,13 @@ def _drive_competency_loop(
     remaining = _remaining_criteria(context, current)
     seeded_context = context.model_copy(update={"project_anchor": project})
     routed = routed.model_copy(update={"context": seeded_context})
-    prompted = agent.invoke(routed, competency=current, project_anchor=project, remaining_criteria=remaining)
+    prompted = agent.invoke(
+        routed,
+        competency=current,
+        project_anchor=project,
+        remaining_criteria=remaining,
+        use_persona=settings.persona_enabled,
+    )
     question_index = seeded_context.question_index + 1
     question_counts = dict(seeded_context.competency_question_counts)
     question_counts[current] = question_index
@@ -593,24 +608,32 @@ def _route_start(state: FlowState) -> str:  # Route state to warmup or end nodes
     return "end"
 
 
-def _warmup_agent(registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]]) -> WarmupAgent:  # Build warmup agent from registry
+def _warmup_agent(
+    registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]],
+    *,
+    enable_persona: bool = True,
+) -> WarmupAgent:  # Build warmup agent from registry
     if WARMUP_AGENT_KEY not in registry:
         raise KeyError(f"Registry missing {WARMUP_AGENT_KEY}")
     route, schema = registry[WARMUP_AGENT_KEY]
     if not issubclass(schema, WarmupPlan):
         raise TypeError("Warmup agent schema must extend WarmupPlan")
-    return WarmupAgent(route, schema)  # type: ignore[arg-type]
+    persona = _persona_agent(registry) if enable_persona else None
+    return WarmupAgent(route, schema, persona)  # type: ignore[arg-type]
 
 
 def _competency_agent(
-    registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]]
+    registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]],
+    *,
+    enable_persona: bool = True,
 ) -> CompetencyAgent:  # Build competency agent from registry
     if COMPETENCY_AGENT_KEY not in registry:
         raise KeyError(f"Registry missing {COMPETENCY_AGENT_KEY}")
     route, schema = registry[COMPETENCY_AGENT_KEY]
     if not issubclass(schema, CompetencyPlan):
         raise TypeError("Competency agent schema must extend CompetencyPlan")
-    return CompetencyAgent(route, schema)  # type: ignore[arg-type]
+    persona = _persona_agent(registry) if enable_persona else None
+    return CompetencyAgent(route, schema, persona)  # type: ignore[arg-type]
 
 
 def _evaluator_agent(
@@ -622,6 +645,17 @@ def _evaluator_agent(
     if not issubclass(schema, EvaluationPlan):
         raise TypeError("Evaluator agent schema must extend EvaluationPlan")
     return EvaluatorAgent(route, schema)  # type: ignore[arg-type]
+
+
+def _persona_agent(
+    registry: Dict[str, Tuple[LlmRoute, Type[BaseModel]]]
+) -> PersonaAgent:  # Build persona agent from registry
+    if PERSONA_AGENT_KEY not in registry:
+        raise KeyError(f"Registry missing {PERSONA_AGENT_KEY}")
+    route, schema = registry[PERSONA_AGENT_KEY]
+    if not issubclass(schema, PersonaQuestion):
+        raise TypeError("Persona agent schema must extend PersonaQuestion")
+    return PersonaAgent(route, schema)  # type: ignore[arg-type]
 
 
 def _dedupe(items: Sequence[str]) -> List[str]:  # Preserve order while removing duplicates

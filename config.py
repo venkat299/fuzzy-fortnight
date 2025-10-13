@@ -17,12 +17,14 @@ class LlmRoute(BaseModel):  # LLM endpoint configuration
     response_format: str | None = None
     extra_headers: Dict[str, str] = Field(default_factory=dict)
     sequential: bool = False
+    enforce_json: bool = True
 
 
 class FlowSettings(BaseModel):  # Interview flow configuration
     warmup_questions: int = Field(default=1, ge=0)
     max_competency_followups: int = Field(default=3, ge=1)
     low_score_threshold: float = Field(default=2.5, ge=0.0, le=5.0)
+    persona_enabled: bool = True
 
 
 class AppConfig(BaseModel):  # Application configuration root
