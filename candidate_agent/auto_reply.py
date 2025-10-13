@@ -13,7 +13,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field, model_validator
 
-from config import LlmRoute, load_app_registry
+from config import AppConfig, LlmRoute, NoisySettings, load_config, resolve_registry
 from llm_gateway import call
 
 AUTO_REPLY_AGENT_KEY = "candidate_agent.auto_reply"  # Registry key for candidate auto replies
@@ -127,11 +127,13 @@ _CONNECTORS = ["therefore", "so", "because", "thus", "hence", "consequently"]
 
 _NOISY_PROCESSOR: NoisyPostProcessor | None = None
 _NOISY_OPTIONS: Dict[str, float] = {"temperature": 0.9, "top_p": 0.8}
+_CONFIG_PATH = Path(__file__).resolve().parents[1] / "app_config.json"
 
 
 class NoisyPostProcessor:  # Applies noisy transformations to answers
-    def __init__(self, *, seed: int | None = None) -> None:
+    def __init__(self, *, seed: int | None = None, enable_spelling_mistakes: bool = True) -> None:
         self._rng = random.Random(seed)
+        self._spelling_mistakes = enable_spelling_mistakes
 
     def apply(self, text: str, level: int) -> str:
         spec = NOISY_LEVELS[level]
@@ -170,7 +172,7 @@ class NoisyPostProcessor:  # Applies noisy transformations to answers
         return "".join(result)
 
     def _apply_typos(self, text: str, probability: float) -> str:
-        if probability <= 0:
+        if not self._spelling_mistakes or probability <= 0:
             return text
         tokens = text.split()
         updated: List[str] = []
@@ -293,9 +295,22 @@ class NoisyAnswerPlan(BaseModel):  # LLM-enforced noisy answer payload
         return cls(answer=text)
 
 
+@lru_cache(maxsize=1)
+def _load_app_config() -> AppConfig:  # Cached configuration loader
+    return load_config(_CONFIG_PATH)
+
+
+@lru_cache(maxsize=1)
+def _load_noisy_settings() -> NoisySettings:  # Access noisy candidate settings
+    return _load_app_config().noisy
+
+
 def set_noisy_seed(seed: int | None) -> None:  # Configure deterministic noise for testing
     global _NOISY_PROCESSOR
-    _NOISY_PROCESSOR = NoisyPostProcessor(seed=seed)
+    settings = _load_noisy_settings()
+    _NOISY_PROCESSOR = NoisyPostProcessor(
+        seed=seed, enable_spelling_mistakes=settings.enable_spelling_mistakes
+    )
 
 
 def configure_noisy_generation(*, temperature: float | None = None, top_p: float | None = None) -> None:  # Adjust sampling options
@@ -320,8 +335,8 @@ def generate_noisy_answer(question: str, level: int) -> str:  # Public API to pr
 
 @lru_cache(maxsize=1)
 def _load_noisy_route() -> LlmRoute:  # Load noisy candidate route from config
-    config_path = Path(__file__).resolve().parents[1] / "app_config.json"
-    registry = load_app_registry(config_path, {NOISY_AGENT_KEY: NoisyAnswerPlan})
+    cfg = _load_app_config()
+    registry = resolve_registry(cfg, {NOISY_AGENT_KEY: NoisyAnswerPlan})
     route, _ = registry[NOISY_AGENT_KEY]
     return route
 
@@ -329,7 +344,10 @@ def _load_noisy_route() -> LlmRoute:  # Load noisy candidate route from config
 def _get_noisy_processor() -> NoisyPostProcessor:  # Lazy-create noisy post processor
     global _NOISY_PROCESSOR
     if _NOISY_PROCESSOR is None:
-        _NOISY_PROCESSOR = NoisyPostProcessor()
+        settings = _load_noisy_settings()
+        _NOISY_PROCESSOR = NoisyPostProcessor(
+            enable_spelling_mistakes=settings.enable_spelling_mistakes
+        )
     return _NOISY_PROCESSOR
 
 

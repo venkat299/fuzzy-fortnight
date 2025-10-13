@@ -27,10 +27,15 @@ class FlowSettings(BaseModel):  # Interview flow configuration
     persona_enabled: bool = True
 
 
+class NoisySettings(BaseModel):  # Noisy candidate tuning flags
+    enable_spelling_mistakes: bool = True
+
+
 class AppConfig(BaseModel):  # Application configuration root
     llm_routes: Dict[str, LlmRoute]
     registry: Dict[str, str]
     flow: FlowSettings = Field(default_factory=FlowSettings)
+    noisy: NoisySettings = Field(default_factory=NoisySettings)
 
 
 def load_config(path: Path) -> AppConfig:  # Load configuration from disk
