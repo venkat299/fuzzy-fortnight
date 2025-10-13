@@ -2,7 +2,7 @@
   "llm_routes": {
     "gpt-oss-20b-local": {
       "name": "gpt-oss-20b-local",
-      "base_url": "http://192.168.0.132:1234",
+      "base_url": "http://192.168.1.8:1234",
       "endpoint": "/v1/chat/completions",
       "model": "openai/gpt-oss-20b",
       "timeout_s": 30.0,
@@ -19,11 +19,21 @@
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
+    },
+    "qwen2-human": {
+      "name": "qwen2-human",
+      "base_url": "http://192.168.1.8:1234",
+      "endpoint": "/v1/chat/completions",
+      "model": "dpo-qwen2-1.5b-instruct-human-like",
+      "timeout_s": 30.0,
+      "max_retries": 2,
+      "api_key_env": "LLM_API_KEY",
+      "sequential": false
     }
   },
   "registry": {
-    "jd_analysis.generate_competency_matrix": "qwen3-4b-local",
-    "rubric_design.generate_rubric": "qwen3-4b-local",
+    "jd_analysis.generate_competency_matrix": "gpt-oss-20b-local",
+    "rubric_design.generate_rubric": "gpt-oss-20b-local",
     "flow_manager.warmup_agent": "qwen3-4b-local",
     "flow_manager.competency_primer": "qwen3-4b-local",
     "flow_manager.competency_agent": "qwen3-4b-local",
@@ -33,6 +43,6 @@
   "flow": {
     "warmup_questions": 1,
     "max_competency_followups": 3,
-    "low_score_threshold": 2.5
+    "low_score_threshold": 2
   }
 }
