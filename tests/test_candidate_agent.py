@@ -71,3 +71,16 @@ def test_auto_reply_agent_clamps_level(monkeypatch) -> None:
     )
     assert "Level 1 – The Name-Dropper" in captured["task"]
     assert "Candidate reply depth level: 1" in captured["task"]
+
+
+def test_auto_reply_plan_from_raw_content_plain_text() -> None:
+    plan = AutoReplyPlan.from_raw_content("Ah, solving complex problems is my forte!")
+    assert plan.answer.startswith("Ah, solving complex problems")
+    assert plan.tone == "neutral"
+
+
+def test_auto_reply_plan_from_raw_content_dict_string() -> None:
+    payload = '{"content": "I focus on resilient pipelines.", "tone": "Positive"}'
+    plan = AutoReplyPlan.from_raw_content(payload)
+    assert plan.answer == "I focus on resilient pipelines."
+    assert plan.tone == "positive"

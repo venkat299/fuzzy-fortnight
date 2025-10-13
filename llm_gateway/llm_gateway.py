@@ -171,7 +171,16 @@ def _extract_content(data: Any) -> str:  # Extract message content from LLM resp
 
 def _validate(schema: Type[T], content: str) -> T:  # Parse JSON content with schema
     cleaned = _strip_code_fences(content)
-    return schema.model_validate_json(cleaned)
+    try:
+        return schema.model_validate_json(cleaned)
+    except (json.JSONDecodeError, ValidationError) as exc:
+        adapter = getattr(schema, "from_raw_content", None)
+        if callable(adapter):
+            try:
+                return adapter(cleaned)  # type: ignore[return-value]
+            except Exception:  # noqa: BLE001
+                pass
+        raise exc
 
 
 def _strip_code_fences(content: str) -> str:  # Remove common markdown fences from LLM output

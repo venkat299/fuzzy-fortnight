@@ -1,13 +1,14 @@
 from __future__ import annotations  # Candidate auto-answer agent implementation
 
+import json
 from textwrap import dedent
 from pathlib import Path
-from typing import Dict, List, Sequence, Tuple, Type
+from typing import Any, Dict, List, Mapping, Sequence, Tuple, Type
 
 from langchain_core.chat_history import InMemoryChatMessageHistory
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, HumanMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from config import LlmRoute, load_app_registry
 from llm_gateway import call
@@ -69,6 +70,37 @@ class AutoReplyContext(BaseModel):  # Candidate memory comprising resume and pri
 class AutoReplyPlan(BaseModel):  # LLM-enforced candidate reply payload
     answer: str
     tone: str = "neutral"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy(cls, value: Any) -> Dict[str, Any]:  # Accept legacy dict or raw string formats
+        if isinstance(value, str):
+            return {"answer": value, "tone": "neutral"}
+        if isinstance(value, dict):
+            if "answer" in value or "tone" in value:
+                return value
+            content = value.get("content")
+            if isinstance(content, str):
+                tone = value.get("tone") or value.get("style") or value.get("mood")
+                return {"answer": content, "tone": tone or "neutral"}
+        return value
+
+    @classmethod
+    def from_raw_content(cls, content: str) -> "AutoReplyPlan":  # Build plan from non-JSON LLM content
+        text = content.strip()
+        if not text:
+            return cls(answer="", tone="neutral")
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return cls(answer=text, tone="neutral")
+        if isinstance(parsed, str):
+            return cls(answer=parsed, tone="neutral")
+        if isinstance(parsed, dict):
+            answer = _first_string(parsed, ["answer", "content", "message"]) or text
+            tone = _canonical_tone(_first_string(parsed, ["tone", "style", "mood"]))
+            return cls(answer=answer, tone=tone)
+        return cls(answer=text, tone="neutral")
 
 
 class AutoReplyOutcome(BaseModel):  # Result returned to API callers with updated memory
@@ -139,9 +171,7 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
         answer = plan.answer.strip()
         qa = QuestionAnswer(question=question.strip(), answer=answer)
         updated_history = list(memory.history) + [qa]
-        tone = (plan.tone or "neutral").strip().lower()
-        if tone not in {"neutral", "positive"}:
-            tone = "neutral"
+        tone = _canonical_tone(plan.tone)
         return AutoReplyOutcome(message=qa, tone=tone, history=updated_history)
 
 
@@ -217,6 +247,21 @@ def _clamp(summary: str, limit: int = 600) -> str:  # Clamp resume summary for p
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
+
+
+def _first_string(data: Mapping[str, Any], keys: Sequence[str]) -> str:  # Fetch first non-empty string from mapping
+    for key in keys:
+        value = data.get(key)
+        if isinstance(value, str):
+            text = value.strip()
+            if text:
+                return text
+    return ""
+
+
+def _canonical_tone(value: str | None) -> str:  # Normalize tone metadata with neutral fallback
+    normalized = (value or "").strip().lower()
+    return "positive" if normalized == "positive" else "neutral"
 
 
 __all__ = [

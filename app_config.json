@@ -5,7 +5,7 @@
       "base_url": "http://192.168.1.8:1234",
       "endpoint": "/v1/chat/completions",
       "model": "openai/gpt-oss-20b",
-      "timeout_s": 30.0,
+      "timeout_s": 60.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
@@ -15,7 +15,7 @@
       "base_url": "http://192.168.1.8:1234",
       "endpoint": "/v1/chat/completions",
       "model": "qwen/qwen3-4b-2507",
-      "timeout_s": 30.0,
+      "timeout_s": 60.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
@@ -25,7 +25,7 @@
       "base_url": "http://192.168.1.8:1234",
       "endpoint": "/v1/chat/completions",
       "model": "dpo-qwen2-1.5b-instruct-human-like",
-      "timeout_s": 30.0,
+      "timeout_s": 60.0,
       "max_retries": 2,
       "api_key_env": "LLM_API_KEY",
       "sequential": false
@@ -37,7 +37,7 @@
     "flow_manager.warmup_agent": "qwen3-4b-local",
     "flow_manager.competency_primer": "qwen3-4b-local",
     "flow_manager.competency_agent": "qwen3-4b-local",
-    "candidate_agent.auto_reply": "qwen3-4b-local",
+    "candidate_agent.auto_reply": "qwen2-human",
     "flow_manager.evaluator_agent": "qwen3-4b-local"
   },
   "flow": {
