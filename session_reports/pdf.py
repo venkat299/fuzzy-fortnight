@@ -235,16 +235,70 @@ def _render_llm_section(pdf: FPDF, llms: Sequence[Tuple[str, str, str]]) -> None
         pdf.ln(2)
         pdf.set_text_color(*TEXT)
         return
-    pdf.set_x(pdf.l_margin)
+    width = _effective_width(pdf)
+    gap = 8.0
+    line_height = 6.0
+    if len(llms) == 1:
+        module, route, model = llms[0]
+        label = module.split(".")[-1].replace("_", " ").title()
+        pdf.set_x(pdf.l_margin)
+        pdf.set_text_color(*TEXT)
+        pdf.set_font(pdf._font_regular, "", 11)
+        pdf.multi_cell(width, line_height, f"{bullet} {label}: {route} ({model})")
+        pdf.ln(2)
+        return
+    column_width = (width - gap) / 2.0
     pdf.set_text_color(*TEXT)
     pdf.set_font(pdf._font_regular, "", 11)
-    for module, route, model in llms:
-        label = module.split(".")[-1].replace("_", " ").title()
-        pdf.multi_cell(
-            _effective_width(pdf),
-            6,
-            f"{bullet} {label}: {route} ({model})",
-        )
+    entries = list(llms)
+    rows = math.ceil(len(entries) / 2)
+    for row in range(rows):
+        left_idx = row
+        right_idx = row + rows
+        left_text = ""
+        right_text = ""
+        if left_idx < len(entries):
+            module, route, model = entries[left_idx]
+            label = module.split(".")[-1].replace("_", " ").title()
+            left_text = f"{bullet} {label}: {route} ({model})"
+        if right_idx < len(entries):
+            module, route, model = entries[right_idx]
+            label = module.split(".")[-1].replace("_", " ").title()
+            right_text = f"{bullet} {label}: {route} ({model})"
+        left_height = _calc_text_height(pdf, column_width, left_text, line_height)
+        right_height = _calc_text_height(pdf, column_width, right_text, line_height)
+        row_height = max(left_height, right_height) + 2
+        if pdf.get_y() + row_height > pdf.page_break_trigger:
+            pdf.add_page()
+        origin_x = pdf.l_margin
+        origin_y = pdf.get_y()
+        if left_text:
+            pdf.set_xy(origin_x, origin_y)
+            try:
+                pdf.multi_cell(
+                    column_width,
+                    line_height,
+                    left_text,
+                    align="L",
+                    new_x=XPos.RIGHT,
+                    new_y=YPos.TOP,
+                )
+            except TypeError:
+                pdf.multi_cell(column_width, line_height, left_text, align="L")
+        pdf.set_xy(origin_x + column_width + gap, origin_y)
+        if right_text:
+            try:
+                pdf.multi_cell(
+                    column_width,
+                    line_height,
+                    right_text,
+                    align="L",
+                    new_x=XPos.LMARGIN,
+                    new_y=YPos.NEXT,
+                )
+            except TypeError:
+                pdf.multi_cell(column_width, line_height, right_text, align="L")
+        pdf.set_xy(pdf.l_margin, origin_y + row_height)
     pdf.ln(2)
 
 
@@ -263,6 +317,8 @@ def _render_competency_table(pdf: FPDF, evaluator: EvaluatorState | None) -> flo
         _effective_width(pdf) * 0.33,
         _effective_width(pdf) * 0.34,
     ]
+    row_span = sum(widths)
+    line_height = 6.0
     pdf.set_x(pdf.l_margin)
     pdf.set_fill_color(*ACCENT)
     pdf.set_text_color(255, 255, 255)
@@ -287,16 +343,41 @@ def _render_competency_table(pdf: FPDF, evaluator: EvaluatorState | None) -> flo
     count = 0
     for idx, (name, score) in enumerate(evaluator.scores.items()):
         fill = idx % 2 == 0
+        notes = "; ".join(score.notes) or "-"
+        updates = "; ".join(score.rubric_updates) or "-"
+        cells = [
+            (widths[0], name),
+            (widths[1], _score_value(score.score)),
+            (widths[2], notes),
+            (widths[3], updates),
+        ]
+        heights = [_calc_text_height(pdf, width, text, line_height) for width, text in cells]
+        row_height = max(heights) + 2
+        if pdf.get_y() + row_height > pdf.page_break_trigger:
+            pdf.add_page()
+            pdf.set_x(pdf.l_margin)
+            pdf.set_fill_color(*ACCENT)
+            pdf.set_text_color(255, 255, 255)
+            pdf.set_font(pdf._font_bold, "B", 10)
+            for col, title in enumerate(headers):
+                try:
+                    pdf.cell(widths[col], 8, title, align="L", fill=True)
+                except TypeError:
+                    pdf.cell(widths[col], 8, title, align="L")
+            pdf.ln(8)
+            pdf.set_text_color(*TEXT)
+            pdf.set_font(pdf._font_regular, "", 10)
+        origin_x = pdf.l_margin
+        origin_y = pdf.get_y()
         if fill:
             pdf.set_fill_color(247, 250, 255)
-        pdf.set_x(pdf.l_margin)
-        pdf.cell(widths[0], 7, name, border=0, fill=fill)
-        pdf.cell(widths[1], 7, _score_value(score.score), border=0, fill=fill)
-        notes = "; ".join(score.notes) or "-"
-        pdf.cell(widths[2], 7, notes, border=0, fill=fill)
-        updates = "; ".join(score.rubric_updates) or "-"
-        pdf.cell(widths[3], 7, updates, border=0, fill=fill)
-        pdf.ln(7)
+            pdf.rect(origin_x, origin_y, row_span, row_height, style="F")
+        current_x = origin_x
+        for width, text in cells:
+            pdf.set_xy(current_x + 1, origin_y + 1)
+            pdf.multi_cell(width - 2, line_height, text)
+            current_x += width
+        pdf.set_y(origin_y + row_height)
         total += score.score
         count += 1
     pdf.ln(2)
@@ -373,9 +454,6 @@ def _format_entry_details(entry: SessionExchange) -> List[str]:  # Build highlig
         details.append(f"Competency: {entry.competency}")
     if entry.criteria:
         details.append("Criteria: " + ", ".join(entry.criteria))
-    anchors = entry.evaluator.anchors.get(stage, [])
-    for anchor in anchors:
-        details.append(f"Anchor: {anchor}")
     if entry.competency:
         score = entry.evaluator.scores.get(entry.competency)
         if score:
@@ -383,6 +461,25 @@ def _format_entry_details(entry: SessionExchange) -> List[str]:  # Build highlig
             for name, level in score.criterion_levels.items():
                 details.append(f"{name}: Level {level}")
     return details
+
+
+def _strip_targeted_criteria(system_message: str) -> str:  # Remove targeted criteria section from system text
+    if not system_message:
+        return ""
+    lines: List[str] = []
+    skipping = False
+    for raw_line in system_message.splitlines():
+        stripped = raw_line.strip()
+        if stripped.lower() == "targeted criteria:":
+            skipping = True
+            continue
+        if skipping and (stripped.startswith("-") or not stripped):
+            continue
+        if skipping:
+            skipping = False
+        lines.append(raw_line)
+    cleaned = "\n".join(lines).strip()
+    return cleaned
 
 
 def _render_transcript_header(pdf: FPDF, left: float, right: float, gap: float) -> None:  # Render transcript header row
@@ -407,7 +504,7 @@ def _render_transcript_row(pdf: FPDF, left: float, right: float, gap: float, ent
     bullet = "•" if getattr(pdf, "_font_regular", "") == "DejaVu" else "-"
     question = f"Q: {(entry.question or '-').strip()}"
     answer = f"A: {(entry.answer or '-').strip()}"
-    system = entry.system_message.strip()
+    system = _strip_targeted_criteria(entry.system_message.strip())
     details = _format_entry_details(entry)
     highlight = "\n".join(f"{bullet} {item}" for item in details)
     text_height = _calc_text_height(pdf, left, question, line) + _calc_text_height(pdf, left, answer, line)
@@ -520,6 +617,7 @@ def generate_session_report_pdf(  # Build PDF payload for a session report
     pdf.set_font(pdf._font_regular, "", 11)
     pdf.set_text_color(*TEXT)
     for line in _rubric_summary(report):
+        pdf.set_x(pdf.l_margin)
         pdf.multi_cell(_effective_width(pdf), 6, f"• {line}")
     pdf.ln(2)
 

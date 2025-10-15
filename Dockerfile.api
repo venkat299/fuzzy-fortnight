@@ -19,6 +19,7 @@ COPY llm_gateway ./llm_gateway
 COPY rubric_design ./rubric_design
 COPY flow_manager ./flow_manager
 COPY candidate_agent ./candidate_agent
+COPY session_reports ./session_reports
 
 EXPOSE 8000
 
