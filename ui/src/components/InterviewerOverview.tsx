@@ -7,6 +7,8 @@ import {
   Pencil,
   RefreshCcw,
   Play,
+  FileText,
+  Download,
 } from "lucide-react";
 import {
   Card,
@@ -586,6 +588,36 @@ export function InterviewerOverview({
                             >
                               <RefreshCcw className="h-3.5 w-3.5" />
                               Redo interview
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="inline-flex items-center gap-1.5 rounded-full px-3"
+                              asChild
+                            >
+                              <a
+                                href={`/api/interviews/${entry.interviewId}/sessions/${entry.candidateId}/report`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                <FileText className="h-3.5 w-3.5" />
+                                View report
+                              </a>
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="inline-flex items-center gap-1.5 rounded-full px-3"
+                              asChild
+                            >
+                              <a
+                                href={`/api/interviews/${entry.interviewId}/sessions/${entry.candidateId}/report.pdf`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                Download PDF
+                              </a>
                             </Button>
                           </TableCell>
                         </TableRow>

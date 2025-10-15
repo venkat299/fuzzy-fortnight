@@ -1,11 +1,12 @@
 from __future__ import annotations  # FastAPI server exposing competency analysis
 
 import logging
+import re
 import sqlite3
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -13,6 +14,7 @@ from jd_analysis import CompetencyMatrix, JobProfile, analyze_with_config
 from llm_gateway import LlmGatewayError
 
 from candidate_management import CandidateRecord, CandidateStore
+from config import load_config
 from flow_manager import (
     ChatTurn,
     InterviewContext as FlowContext,
@@ -28,6 +30,7 @@ from rubric_design import (
     design_with_config as design_rubrics_with_config,
     load_rubrics,
 )
+from session_reports import SessionReport, SessionReportStore, generate_session_report_pdf
 
 
 logger = logging.getLogger(__name__)
@@ -128,6 +131,43 @@ class StartSessionResponse(BaseModel):  # Combined context payload and rubric
 class SessionAdvanceResponse(BaseModel):  # Warmup payload returned after start
     context: SessionContext
     messages: List[SessionMessage]
+
+
+class CriterionScoreSummary(BaseModel):  # Criterion-level score snapshot for reports
+    competency: str
+    criterion: str
+    level: int
+
+
+class CompetencyScoreSummary(BaseModel):  # Competency score snapshot for reports
+    competency: str
+    score: float
+    notes: List[str] = Field(default_factory=list)
+    rubric_updates: List[str] = Field(default_factory=list)
+
+
+class SessionReportExchangeResponse(BaseModel):  # Transcript entry returned in report
+    sequence: int
+    stage: str
+    question: str
+    answer: str
+    competency: Optional[str] = None
+    criteria: List[str] = Field(default_factory=list)
+    system_message: str = ""
+    anchors: List[str] = Field(default_factory=list)
+    criterion_levels: Dict[str, int] = Field(default_factory=dict)
+
+
+class SessionReportResponse(BaseModel):  # Report payload returned to clients
+    interview_id: str
+    candidate_id: str
+    candidate_name: str
+    job_title: str
+    overall_score: Optional[float] = None
+    competency_scores: List[CompetencyScoreSummary] = Field(default_factory=list)
+    criterion_scores: List[CriterionScoreSummary] = Field(default_factory=list)
+    exchanges: List[SessionReportExchangeResponse] = Field(default_factory=list)
+    rubric: InterviewRubricSnapshot
 
 
 class AutoReplyRequest(BaseModel):  # Candidate auto-reply generation payload
@@ -275,6 +315,15 @@ def start_interview_session(
         candidate_level=payload.candidate_level,
         qa_history=payload.qa_history,
     )
+    report_store = _session_report_store()
+    report_store.initialize_session(
+        interview_id,
+        payload.candidate_id,
+        candidate_name=candidate.full_name,
+        job_title=snapshot.job_title,
+        rubric=snapshot,
+        reset=True,
+    )
     return StartSessionResponse(
         context=response_context,
         messages=[],
@@ -308,17 +357,11 @@ def begin_interview_warmup(
         logger.exception("Unable to start warmup stage")
         raise HTTPException(status_code=500, detail="Unable to start warmup stage") from exc
 
-    response_messages = [
-        SessionMessage(
-            speaker=message.speaker,
-            content=message.content,
-            tone=_normalize_tone(message.tone),
-            competency=message.competency,
-            targeted_criteria=list(message.targeted_criteria),
-            project_anchor=message.project_anchor,
-        )
-        for message in launch.messages
-    ]
+    response_messages = _convert_chat_turns(
+        launch.messages,
+        launch.context,
+        stage_hint="warmup",
+    )
     updated_history: List[QuestionAnswer] = list(payload.qa_history)
     response_context = _session_context_from_flow(
         launch.context,
@@ -374,8 +417,16 @@ def submit_candidate_reply(
         raise HTTPException(status_code=400, detail="Question text is required.")
     if not answer:
         raise HTTPException(status_code=400, detail="Candidate answer is required.")
+    stage_value = payload.stage.strip() if isinstance(payload.stage, str) else ""
+    stage = stage_value or ("competency" if payload.competency else "warmup")
     updated_history: List[QuestionAnswer] = list(payload.qa_history) + [
-        QuestionAnswer(question=question, answer=answer)
+        QuestionAnswer(
+            question=question,
+            answer=answer,
+            competency=payload.competency,
+            criteria=list(payload.targeted_criteria),
+            stage=stage,
+        )
     ]
     candidate_message = SessionMessage(
         speaker="Candidate",
@@ -384,6 +435,15 @@ def submit_candidate_reply(
         competency=payload.competency,
         targeted_criteria=list(payload.targeted_criteria),
         project_anchor=payload.project_anchor,
+    )
+    report_store = _session_report_store()
+    report_store.initialize_session(
+        interview_id,
+        payload.candidate_id,
+        candidate_name=candidate.full_name,
+        job_title=snapshot.job_title,
+        rubric=snapshot,
+        reset=False,
     )
     flow_context = _flow_context_from_payload(
         interview_id,
@@ -406,17 +466,35 @@ def submit_candidate_reply(
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected error while advancing session")
         raise HTTPException(status_code=500, detail="Unable to advance session") from exc
-    follow_up_messages = [
-        SessionMessage(
-            speaker=turn.speaker,
-            content=turn.content,
-            tone=_normalize_tone(turn.tone),
-            competency=turn.competency,
-            targeted_criteria=list(turn.targeted_criteria),
-            project_anchor=turn.project_anchor,
+    follow_up_messages = _convert_chat_turns(
+        flow_launch.messages,
+        flow_launch.context,
+        stage_hint=flow_launch.context.stage,
+    )
+    system_message = _build_system_message(
+        flow_launch.context,
+        stage,
+        competency=payload.competency,
+        targeted=payload.targeted_criteria,
+    )
+    try:
+        report_store.record_exchange(
+            interview_id,
+            payload.candidate_id,
+            stage=stage,
+            question=question,
+            answer=answer,
+            competency=payload.competency,
+            criteria=list(payload.targeted_criteria),
+            system_message=system_message,
+            evaluator=flow_launch.context.evaluator,
         )
-        for turn in flow_launch.messages
-    ]
+    except KeyError:
+        logger.warning(
+            "Session report store not initialized for interview %s candidate %s",
+            interview_id,
+            payload.candidate_id,
+        )
     response_context = _session_context_from_flow(
         flow_launch.context,
         auto_answer_enabled=payload.auto_answer_enabled,
@@ -427,6 +505,70 @@ def submit_candidate_reply(
         context=response_context,
         messages=[candidate_message, *follow_up_messages],
     )
+
+
+@app.get(
+    "/api/interviews/{interview_id}/sessions/{candidate_id}/report",
+    response_model=SessionReportResponse,
+)
+def fetch_session_report(interview_id: str, candidate_id: str) -> SessionReportResponse:
+    store = _session_report_store()
+    try:
+        report = store.load_report(interview_id, candidate_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session report not found") from exc
+    return _format_session_report(report)
+
+
+@app.get("/api/interviews/{interview_id}/sessions/{candidate_id}/report.pdf")
+def fetch_session_report_pdf(interview_id: str, candidate_id: str) -> Response:
+    store = _session_report_store()
+    try:
+        report = store.load_report(interview_id, candidate_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session report not found") from exc
+    llms = _session_llm_routes()
+    payload = generate_session_report_pdf(report, llms)
+    safe_candidate = _safe_slug(report.candidate_name)
+    safe_role = _safe_slug(report.job_title)
+    filename = f"{report.interview_id}-{safe_candidate or report.candidate_id}-{safe_role or 'report'}.pdf"
+    headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    return Response(content=payload, media_type="application/pdf", headers=headers)
+
+
+def _session_report_store() -> SessionReportStore:  # Construct session report store
+    return SessionReportStore(DATA_PATH)
+
+
+def _session_llm_routes() -> List[Tuple[str, str, str]]:  # Collect LLM routes used across modules
+    try:
+        cfg = load_config(CONFIG_PATH)
+    except FileNotFoundError:
+        return []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to load LLM config: %s", exc)
+        return []
+    details: List[Tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for module in sorted(cfg.registry.keys()):
+        route_id = cfg.registry[module]
+        if route_id in seen:
+            continue
+        route = cfg.llm_routes.get(route_id)
+        if not route:
+            continue
+        seen.add(route_id)
+        details.append((module, route.name, route.model))
+    return details
+
+
+def _safe_slug(value: str) -> str:  # Sanitize value for filenames
+    if not value:
+        return ""
+    lowered = value.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", lowered)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug
 
 
 def _prime_competency_projects(
@@ -631,11 +773,177 @@ def _qa_to_chat_turns(history: List[QuestionAnswer]) -> List[ChatTurn]:  # Conve
     for entry in history:
         question = entry.question.strip()
         answer = entry.answer.strip()
+        competency = entry.competency
+        criteria = list(entry.criteria)
         if question:
-            turns.append(ChatTurn(speaker="Interviewer", content=question, tone="neutral"))
+            turns.append(
+                ChatTurn(
+                    speaker="Interviewer",
+                    content=question,
+                    tone="neutral",
+                    competency=competency,
+                    targeted_criteria=criteria,
+                )
+            )
         if answer:
-            turns.append(ChatTurn(speaker="Candidate", content=answer, tone="neutral"))
+            turns.append(
+                ChatTurn(
+                    speaker="Candidate",
+                    content=answer,
+                    tone="neutral",
+                    competency=competency,
+                    targeted_criteria=criteria,
+                )
+            )
     return turns
+
+
+def _build_system_message(
+    context: FlowContext,
+    stage: str,
+    *,
+    competency: Optional[str],
+    targeted: Sequence[str],
+) -> str:  # Build system message summarizing anchors and criteria
+    stage_key = stage or "warmup"
+    anchors = [item.strip() for item in context.evaluator.anchors.get(stage_key, []) if item.strip()]
+    criteria = [" ".join(str(item).split()) for item in targeted if str(item).strip()]
+    levels: Dict[str, int] = {}
+    if competency:
+        raw_levels = context.competency_criterion_levels.get(competency, {})
+        levels = {
+            str(name): int(value)
+            for name, value in raw_levels.items()
+            if str(name).strip()
+        }
+    lines: List[str] = []
+    if anchors:
+        lines.append("Anchor points:")
+        lines.extend(f"- {anchor}" for anchor in anchors)
+    if criteria:
+        lines.append("Targeted criteria:")
+        lines.extend(f"- {criterion}" for criterion in criteria)
+    if levels:
+        lines.append("Criterion levels:")
+        for name, level in sorted(levels.items()):
+            lines.append(f"- {name}: Level {level}")
+    return "\n".join(lines)
+
+
+def _convert_chat_turns(
+    messages: Sequence[ChatTurn],
+    context: FlowContext,
+    *,
+    stage_hint: str | None = None,
+) -> List[SessionMessage]:  # Convert flow turns into API messages with system notes
+    results: List[SessionMessage] = []
+    for turn in messages:
+        message = SessionMessage(
+            speaker=turn.speaker,
+            content=turn.content,
+            tone=_normalize_tone(turn.tone),
+            competency=turn.competency,
+            targeted_criteria=list(turn.targeted_criteria),
+            project_anchor=turn.project_anchor,
+        )
+        results.append(message)
+        speaker = (turn.speaker or "").strip().lower()
+        if speaker.startswith("interviewer"):
+            stage_value = stage_hint or context.stage
+            stage = stage_value or "warmup"
+            if turn.competency:
+                stage = "competency"
+            system_text = _build_system_message(
+                context,
+                stage,
+                competency=turn.competency,
+                targeted=turn.targeted_criteria,
+            )
+            if system_text:
+                results.append(
+                    SessionMessage(
+                        speaker="System",
+                        content=system_text,
+                        tone="neutral",
+                        competency=turn.competency,
+                        targeted_criteria=[],
+                        project_anchor="",
+                    )
+                )
+    return results
+
+
+def _format_session_report(report: SessionReport) -> SessionReportResponse:  # Map stored report to response payload
+    exchanges: List[SessionReportExchangeResponse] = []
+    latest: EvaluatorState | None = None
+    for exchange in report.exchanges:
+        evaluator = exchange.evaluator
+        latest = evaluator
+        stage = exchange.stage or "warmup"
+        anchors = [item.strip() for item in evaluator.anchors.get(stage, []) if item.strip()]
+        criterion_levels: Dict[str, int] = {}
+        if exchange.competency:
+            score_entry = evaluator.scores.get(exchange.competency)
+            if score_entry:
+                criterion_levels = {
+                    str(name): int(value)
+                    for name, value in score_entry.criterion_levels.items()
+                    if str(name).strip()
+                }
+        exchanges.append(
+            SessionReportExchangeResponse(
+                sequence=exchange.sequence,
+                stage=stage,
+                question=exchange.question,
+                answer=exchange.answer,
+                competency=exchange.competency,
+                criteria=list(exchange.criteria),
+                system_message=exchange.system_message,
+                anchors=anchors,
+                criterion_levels=criterion_levels,
+            )
+        )
+    competency_scores: List[CompetencyScoreSummary] = []
+    criterion_scores: List[CriterionScoreSummary] = []
+    overall: List[float] = []
+    if latest:
+        for name, score in latest.scores.items():
+            competency_scores.append(
+                CompetencyScoreSummary(
+                    competency=name,
+                    score=score.score,
+                    notes=list(score.notes),
+                    rubric_updates=list(score.rubric_updates),
+                )
+            )
+            for criterion, level in score.criterion_levels.items():
+                try:
+                    numeric = int(level)
+                except (TypeError, ValueError):
+                    numeric = 0
+                criterion_scores.append(
+                    CriterionScoreSummary(
+                        competency=name,
+                        criterion=criterion,
+                        level=numeric,
+                    )
+                )
+            if score.score > 0:
+                overall.append(score.score)
+    overall_score = None
+    if overall:
+        overall_score = sum(overall) / len(overall)
+    return SessionReportResponse(
+        interview_id=report.interview_id,
+        candidate_id=report.candidate_id,
+        candidate_name=report.candidate_name,
+        job_title=report.job_title,
+        overall_score=overall_score,
+        competency_scores=competency_scores,
+        criterion_scores=criterion_scores,
+        exchanges=exchanges,
+        rubric=report.rubric,
+    )
 
 
 def _load_session_resources(

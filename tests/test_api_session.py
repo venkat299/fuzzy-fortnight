@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import api_server
 from candidate_agent import AutoReplyOutcome, QuestionAnswer
 from candidate_management import CandidateStore
 from flow_manager import ChatTurn, InterviewContext, SessionLaunch
-from flow_manager.models import EvaluatorState
+from flow_manager.models import EvaluatorState, CompetencyScore
 from rubric_design.rubric_design import Rubric, RubricAnchor, RubricCriterion, RubricStore
 
 
@@ -38,6 +39,41 @@ def _rubric() -> Rubric:
     )
 
 
+def _write_config(path: Path) -> None:
+    payload = {
+        "llm_routes": {
+            "stub-route": {
+                "name": "stub-route",
+                "base_url": "http://localhost",
+                "endpoint": "/v1",
+                "model": "stub-model",
+                "timeout_s": 30,
+                "max_retries": 1,
+                "api_key_env": None,
+                "sequential": False,
+            }
+        },
+        "registry": {
+            "jd_analysis.generate_competency_matrix": "stub-route",
+            "rubric_design.generate_rubric": "stub-route",
+            "flow_manager.warmup_agent": "stub-route",
+            "flow_manager.competency_primer": "stub-route",
+            "flow_manager.competency_agent": "stub-route",
+            "candidate_agent.auto_reply": "stub-route",
+            "flow_manager.evaluator_agent": "stub-route",
+            "flow_manager.persona_agent": "stub-route",
+        },
+        "flow": {
+            "warmup_questions": 1,
+            "max_competency_followups": 3,
+            "low_score_threshold": 2.0,
+            "persona_enabled": False,
+        },
+        "noisy": {"enable_spelling_mistakes": False},
+    }
+    path.write_text(json.dumps(payload))
+
+
 def test_start_session_endpoint_returns_context_without_messages(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "interviews.sqlite"
     rubric_store = RubricStore(db_path)
@@ -62,7 +98,9 @@ def test_start_session_endpoint_returns_context_without_messages(monkeypatch, tm
         raise AssertionError("start_session_with_config should not be called")
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
-    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(api_server, "start_session_with_config", fail_start_session)
     monkeypatch.setattr(
         api_server,
@@ -144,7 +182,9 @@ def test_begin_warmup_endpoint_returns_question(monkeypatch, tmp_path) -> None:
         return fake_launch
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
-    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(api_server, "start_session_with_config", fake_start_session)
     monkeypatch.setattr(
         api_server,
@@ -219,7 +259,9 @@ def test_begin_warmup_endpoint_does_not_append_candidate_reply(monkeypatch, tmp_
         raise AssertionError("auto_reply_with_config should not be called during warmup")
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
-    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(api_server, "start_session_with_config", fake_start_session)
     monkeypatch.setattr(
         api_server,
@@ -311,7 +353,9 @@ def test_generate_candidate_auto_reply_returns_plan(monkeypatch, tmp_path) -> No
         )
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
-    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(api_server, "auto_reply_with_config", fake_auto_reply)
 
     client = TestClient(api_server.app)
@@ -372,7 +416,9 @@ def test_submit_candidate_reply_returns_follow_up(monkeypatch, tmp_path) -> None
         )
 
     monkeypatch.setattr(api_server, "DATA_PATH", db_path)
-    monkeypatch.setattr(api_server, "CONFIG_PATH", tmp_path / "config.json")
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
     monkeypatch.setattr(api_server, "advance_session_with_config", fake_advance_session)
 
     prior_history = [
@@ -413,7 +459,14 @@ def test_submit_candidate_reply_returns_follow_up(monkeypatch, tmp_path) -> None
     assert payload["messages"][0]["tone"] == "positive"
     assert payload["messages"][1]["speaker"] == "Interviewer"
     assert payload["messages"][1]["targeted_criteria"] == ["Stakeholders"]
+    assert len(payload["messages"]) == 3
+    assert payload["messages"][2]["speaker"] == "System"
+    assert "Targeted criteria" in payload["messages"][2]["content"]
+    assert "Stakeholders" in payload["messages"][2]["content"]
     assert payload["context"]["qa_history"][-1]["answer"].startswith("I schedule recurring alignment forums")
+    assert payload["context"]["qa_history"][-1]["competency"] == "Collaboration"
+    assert payload["context"]["qa_history"][-1]["criteria"] == ["Stakeholders"]
+    assert payload["context"]["qa_history"][-1]["stage"] == "warmup"
     assert payload["context"]["candidate_level"] == 5
     assert payload["context"]["evaluator"] == {
         "summary": "",
@@ -429,3 +482,109 @@ def test_submit_candidate_reply_returns_follow_up(monkeypatch, tmp_path) -> None
     )
     assert len(captured_history) == 4
     assert captured_history[-1].speaker == "Candidate"
+
+
+def test_session_report_endpoint_returns_transcript(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "interviews.sqlite"
+    rubric_store = RubricStore(db_path)
+    interview_id = "session-6"
+    rubric_store.save(
+        interview_id=interview_id,
+        job_title="Staff Engineer",
+        experience_years="7-10",
+        job_description="Owns distributed systems",
+        rubrics=[_rubric()],
+    )
+    candidate_store = CandidateStore(db_path)
+    candidate = candidate_store.create_candidate(
+        full_name="Jordan Blake",
+        resume="Seasoned engineer who builds resilient services and collaborates deeply with design.",
+        interview_id=interview_id,
+        status="scheduled",
+    )
+    candidate_id = candidate.candidate_id
+
+    def fake_advance_session(context, history, *, config_path):
+        evaluator = EvaluatorState(
+            summary="Captured warmup insight",
+            anchors={"warmup": ["Identified stakeholder cadence"]},
+            scores={
+                "Collaboration": CompetencyScore(
+                    competency="Collaboration",
+                    score=3.5,
+                    notes=["Strong collaboration story"],
+                    rubric_updates=["Stakeholders explored"],
+                    criterion_levels={"Stakeholders": 4},
+                )
+            },
+            rubric_updates={"warmup": ["Stakeholders explored"]},
+        )
+        updated_context = context.model_copy(update={"evaluator": evaluator})
+        return SessionLaunch(
+            context=updated_context,
+            messages=[
+                ChatTurn(
+                    speaker="Interviewer",
+                    content="Thanks. Can you expand on delivery trade-offs?",
+                    tone="neutral",
+                    competency="Collaboration",
+                    targeted_criteria=["Delivery"],
+                    project_anchor="Primer project",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(api_server, "DATA_PATH", db_path)
+    config_path = tmp_path / "config.json"
+    _write_config(config_path)
+    monkeypatch.setattr(api_server, "CONFIG_PATH", config_path)
+    monkeypatch.setattr(api_server, "advance_session_with_config", fake_advance_session)
+
+    client = TestClient(api_server.app)
+    reply_response = client.post(
+        f"/api/interviews/{interview_id}/session/reply",
+        json={
+            "candidate_id": candidate_id,
+            "question": "How do you keep stakeholders aligned?",
+            "answer": "I schedule recurring alignment forums with clear agendas and shared artifacts.",
+            "tone": "neutral",
+            "stage": "warmup",
+            "auto_answer_enabled": True,
+            "candidate_level": 3,
+            "qa_history": [],
+            "competency": "Collaboration",
+            "competency_index": 0,
+            "question_index": 0,
+            "project_anchor": "Primer project",
+            "competency_projects": {"Collaboration": "Primer project"},
+            "competency_criteria": {"Collaboration": ["Communication", "Stakeholders", "Delivery"]},
+            "competency_criterion_levels": {"Collaboration": {"Communication": 2}},
+            "competency_covered": {"Collaboration": []},
+            "competency_question_counts": {"Collaboration": 0},
+            "competency_low_scores": {"Collaboration": 0},
+            "targeted_criteria": ["Stakeholders"],
+        },
+    )
+    assert reply_response.status_code == 200
+
+    report_response = client.get(
+        f"/api/interviews/{interview_id}/sessions/{candidate_id}/report"
+    )
+    assert report_response.status_code == 200
+    report = report_response.json()
+    assert report["interview_id"] == interview_id
+    assert report["candidate_id"] == candidate_id
+    assert report["overall_score"] == 3.5
+    assert report["competency_scores"][0]["competency"] == "Collaboration"
+    assert report["competency_scores"][0]["score"] == 3.5
+    assert report["criterion_scores"][0]["level"] == 4
+    assert report["exchanges"][0]["question"] == "How do you keep stakeholders aligned?"
+    assert "Stakeholders" in report["exchanges"][0]["system_message"]
+    assert report["rubric"]["interview_id"] == interview_id
+
+    pdf_response = client.get(
+        f"/api/interviews/{interview_id}/sessions/{candidate_id}/report.pdf"
+    )
+    assert pdf_response.status_code == 200
+    assert pdf_response.headers["content-type"].startswith("application/pdf")
+    assert pdf_response.content.startswith(b"%PDF")

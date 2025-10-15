@@ -3,6 +3,9 @@ export type ChatTone = 'neutral' | 'positive';
 export interface QuestionAnswer {
   question: string;
   answer: string;
+  competency: string | null;
+  criteria: string[];
+  stage: string;
 }
 
 export interface SessionMessage {

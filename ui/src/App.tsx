@@ -551,7 +551,17 @@ export default function App() {
         if (!question && !answer) {
           return null;
         }
-        return { question, answer } satisfies QuestionAnswer;
+        const competencyValue = typeof row.competency === 'string' ? row.competency.trim() : '';
+        const criteria = parseStringList(row.criteria);
+        const stageValue = typeof row.stage === 'string' ? row.stage.trim() : '';
+        const stage = stageValue || (competencyValue ? 'competency' : 'warmup');
+        return {
+          question,
+          answer,
+          competency: competencyValue || null,
+          criteria,
+          stage,
+        } satisfies QuestionAnswer;
       })
       .filter((entry): entry is QuestionAnswer => Boolean(entry));
     const competencyValue = typeof contextRow.competency === 'string' ? contextRow.competency.trim() : '';

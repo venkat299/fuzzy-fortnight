@@ -357,6 +357,9 @@ def _generation_options() -> Dict[str, float]:  # Clone generation sampling opti
 class QuestionAnswer(BaseModel):  # Single interview exchange stored in memory
     question: str
     answer: str
+    competency: str | None = None
+    criteria: List[str] = Field(default_factory=list)
+    stage: str = "warmup"
 
 
 class AutoReplyContext(BaseModel):  # Candidate memory comprising resume and prior exchanges
@@ -471,7 +474,13 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
         plan = call(task, self._schema, cfg=self._route)
         processor = _get_noisy_processor()
         answer = processor.apply(plan.answer.strip(), normalized_level)
-        qa = QuestionAnswer(question=question.strip(), answer=answer)
+        qa = QuestionAnswer(
+            question=question.strip(),
+            answer=answer,
+            competency=memory.competency,
+            criteria=list(memory.targeted_criteria),
+            stage="competency" if memory.competency else "warmup",
+        )
         updated_history = list(memory.history) + [qa]
         tone = _canonical_tone(plan.tone)
         return AutoReplyOutcome(message=qa, tone=tone, history=updated_history)
