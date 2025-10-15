@@ -571,7 +571,7 @@ def _render_transcript(pdf: FPDF, exchanges: Sequence[SessionExchange]) -> None:
 
 def _rubric_summary(rubric: SessionReport) -> Iterable[str]:  # Yield rubric summaries
     for block in rubric.rubric.rubrics:
-        yield f"{block.competency}: band {block.band}, pass >= {block.min_pass_score:.1f}"
+        yield f"{block.competency}: band {block.band}, pass >= {block.min_pass_score}"
 
 
 def generate_session_report_pdf(  # Build PDF payload for a session report

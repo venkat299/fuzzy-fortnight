@@ -42,10 +42,11 @@
       "enforce_json": false
     }
   },
-  "registry": {
-    "jd_analysis.generate_competency_matrix": "gpt-oss-20b-local",
-    "rubric_design.generate_rubric": "gpt-oss-20b-local",
-    "flow_manager.warmup_agent": "qwen3-4b-local",
+    "registry": {
+      "jd_analysis.generate_competency_matrix": "gpt-oss-20b-local",
+      "rubric_design.generate_rubric": "gpt-oss-20b-local",
+      "rubric_design.generate_defaults": "gpt-oss-20b-local",
+      "flow_manager.warmup_agent": "qwen3-4b-local",
     "flow_manager.competency_primer": "qwen3-4b-local",
     "flow_manager.competency_agent": "qwen3-4b-local",
     "candidate_agent.auto_reply": "qwen3-4b-local",

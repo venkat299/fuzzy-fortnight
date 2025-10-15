@@ -346,9 +346,11 @@ export default function App() {
                       })
                       .filter((anchor): anchor is RubricAnchor => Boolean(anchor && anchor.text.trim().length > 0))
                   : [];
+                const weightRaw = Number(criterionRow.weight ?? 1);
+                const weight = Number.isFinite(weightRaw) ? Math.max(1, Math.round(weightRaw)) : 1;
                 return {
                   name: String(criterionRow.name ?? ''),
-                  weight: Number(criterionRow.weight ?? 0),
+                  weight,
                   anchors
                 };
               })
@@ -367,7 +369,7 @@ export default function App() {
           evidence: Array.isArray(row.evidence)
             ? row.evidence.map((item) => String(item ?? '')).filter((item) => item.trim().length > 0)
             : [],
-          minPassScore: Number(row.min_pass_score ?? 0)
+          minPassScore: Math.max(1, Math.min(5, Math.round(Number(row.min_pass_score ?? 0))))
         };
       })
       .filter((rubric): rubric is Rubric => Boolean(rubric && rubric.competency.trim().length > 0));

@@ -19,12 +19,8 @@ def _anchors() -> list[RubricAnchor]:
 
 
 def _criteria() -> list[RubricCriterion]:
-    weights = [0.34, 0.33, 0.33]
     names = ["Communication", "Stakeholders", "Delivery"]
-    return [
-        RubricCriterion(name=name, weight=weight, anchors=_anchors())
-        for name, weight in zip(names, weights, strict=True)
-    ]
+    return [RubricCriterion(name=name, anchors=_anchors()) for name in names]
 
 
 def _rubric() -> Rubric:
@@ -35,7 +31,7 @@ def _rubric() -> Rubric:
         criteria=_criteria(),
         red_flags=["flag"],
         evidence=["Facilitated cross-team workshop", "Mentored juniors", "Drove alignment"],
-        min_pass_score=3.4,
+        min_pass_score=4,
     )
 
 
@@ -56,6 +52,7 @@ def _write_config(path: Path) -> None:
         "registry": {
             "jd_analysis.generate_competency_matrix": "stub-route",
             "rubric_design.generate_rubric": "stub-route",
+            "rubric_design.generate_defaults": "stub-route",
             "flow_manager.warmup_agent": "stub-route",
             "flow_manager.competency_primer": "stub-route",
             "flow_manager.competency_agent": "stub-route",

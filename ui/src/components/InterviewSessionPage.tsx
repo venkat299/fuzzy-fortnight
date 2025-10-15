@@ -173,8 +173,8 @@ export function InterviewSessionPage({
           return;
         }
         const weightValue = Number.isFinite(criterion.weight)
-          ? Math.max(0, Math.round(criterion.weight * 1000) / 10)
-          : 0;
+          ? Math.max(1, Math.round(criterion.weight))
+          : 1;
         const normalized = criterionName.toLowerCase();
         let achievedLevel: number | null = null;
         if (typeof levelEntries === 'object' && levelEntries !== null) {
@@ -316,12 +316,7 @@ export function InterviewSessionPage({
   const averageScoreLabel = scoreValues.length ? averageScore.toFixed(1) : "—";
   const overallScoreLabel = averageScoreLabel;
 
-  const formatWeight = (weight: number) => {
-    if (Number.isInteger(weight)) {
-      return `${weight}%`;
-    }
-    return `${weight.toFixed(1)}%`;
-  };
+  const formatWeight = (weight: number) => `${weight}`;
 
   return (
     <div className="min-h-screen bg-slate-50 p-6">
@@ -639,7 +634,7 @@ export function InterviewSessionPage({
                 <TableRow>
                   <TableHead>Competency</TableHead>
                   <TableHead>Criterion</TableHead>
-                  <TableHead>Weight</TableHead>
+                  <TableHead>Weight (1=equal)</TableHead>
                   <TableHead>Achieved level</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Targeted</TableHead>

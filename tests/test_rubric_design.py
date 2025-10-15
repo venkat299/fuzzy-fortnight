@@ -26,12 +26,30 @@ def _anchors() -> list[rubric.RubricAnchor]:
 
 
 def _criteria() -> list[rubric.RubricCriterion]:
-    weights = [0.34, 0.33, 0.33]
     names = ["Clarity", "Accuracy", "Experience"]
-    return [
-        rubric.RubricCriterion(name=name, weight=weight, anchors=_anchors())
-        for name, weight in zip(names, weights, strict=True)
-    ]
+    return [rubric.RubricCriterion(name=name, anchors=_anchors()) for name in names]
+
+
+DEFAULTS_PLAN = rubric.CompetencyDefaultsPlan(
+    overview="Focus on distributed systems",
+    competencies=[
+        rubric.CompetencyDefaultsEntry(
+            competency="Backend",
+            criteria=["API Contracts", "Resilience", "Observability"],
+            note="Prioritize reliability",
+        ),
+        rubric.CompetencyDefaultsEntry(
+            competency="DevOps",
+            criteria=["CI/CD", "Infrastructure", "Monitoring"],
+            note="",
+        ),
+        rubric.CompetencyDefaultsEntry(
+            competency="Leadership",
+            criteria=["Coaching", "Stakeholder Alignment", "Roadmapping"],
+            note="",
+        ),
+    ],
+)
 
 
 def _rubric(name: str) -> rubric.Rubric:
@@ -42,17 +60,22 @@ def _rubric(name: str) -> rubric.Rubric:
         criteria=_criteria(),
         red_flags=["flag"],
         evidence=["e1", "e2", "e3"],
-        min_pass_score=3.4,
+        min_pass_score=4,
     )
 
 
 def test_build_task_formats_prompt() -> None:
     area = CompetencyArea(name="Backend Development", skills=["HTTP", "Databases", "Resilience"])
-    prompt = rubric._build_task(area, "4-6")
+    defaults_block = rubric._render_defaults_block(DEFAULTS_PLAN)
+    prompt = rubric._build_task(area, "4-6", defaults_block)
     assert prompt.startswith("You are a rubric generator")
     assert '"competency": "Backend Development"' in prompt
     assert '"band": "4-6"' in prompt
-    assert prompt.endswith("Guidance for anchors: tailor to band scope; emphasize definitions, when-to-use, trade-offs, failure modes, and concrete examples from experience.")
+    assert "Defaults by competency" in prompt
+    assert (
+        "Guidance for anchors: tailor to the band's autonomy expectations; emphasize definitions, when-to-use, trade-offs, failure modes, and concrete experience."
+        in prompt
+    )
 
 
 def test_infer_band_matches_numeric_ranges() -> None:
@@ -104,11 +127,13 @@ def test_design_rubrics_generates_and_persists(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(rubric, "call", fake_call)
     monkeypatch.setattr(rubric, "uuid4", lambda: DummyUUID())
+    monkeypatch.setattr(rubric, "generate_competency_defaults", lambda **kwargs: DEFAULTS_PLAN)
     interview_id = rubric.design_rubrics(
         matrix,
         route=route,
         store=store,
         job_description="Detailed JD",
+        defaults_route=route,
     )
     assert interview_id == "deadbeef"
     assert len(tasks) == len(area_names)
@@ -146,8 +171,14 @@ def test_design_with_config_and_load(monkeypatch, tmp_path) -> None:
 
     def fake_load_app_registry(path, schemas):
         assert path == config_path
-        assert schemas == {"rubric_design.generate_rubric": rubric.Rubric}
-        return {"rubric_design.generate_rubric": (route, rubric.Rubric)}
+        assert schemas == {
+            "rubric_design.generate_rubric": rubric.Rubric,
+            "rubric_design.generate_defaults": rubric.CompetencyDefaultsPlan,
+        }
+        return {
+            "rubric_design.generate_rubric": (route, rubric.Rubric),
+            "rubric_design.generate_defaults": (route, rubric.CompetencyDefaultsPlan),
+        }
 
     monkeypatch.setattr(rubric, "load_app_registry", fake_load_app_registry)
     monkeypatch.setattr(
@@ -155,6 +186,7 @@ def test_design_with_config_and_load(monkeypatch, tmp_path) -> None:
         "call",
         lambda task, schema, *, cfg: tasks.append(task) or _rubric("Backend"),
     )
+    monkeypatch.setattr(rubric, "generate_competency_defaults", lambda **kwargs: DEFAULTS_PLAN)
     interview_id = rubric.design_with_config(
         matrix,
         config_path=config_path,

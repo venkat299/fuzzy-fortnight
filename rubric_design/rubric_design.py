@@ -3,11 +3,11 @@ from __future__ import annotations  # Rubric design and persistence module
 from datetime import datetime
 from pathlib import Path
 from textwrap import dedent
-from typing import Iterable, List, Literal
+from typing import Dict, Iterable, List, Literal
 from uuid import uuid4
 import sqlite3
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from config import LlmRoute, load_app_registry
 from jd_analysis import CompetencyArea, CompetencyMatrix
@@ -23,9 +23,13 @@ class RubricAnchor(BaseModel):  # Anchor description for a proficiency level
 
 class RubricCriterion(BaseModel):  # Criterion entry with anchors
     name: str
-    weight: float = Field(ge=0.0)
+    weight: int = Field(default=1, ge=1, le=1)
     anchors: List[RubricAnchor] = Field(min_length=5, max_length=5)
 
+    @field_validator("weight", mode="before")
+    @classmethod
+    def _force_weight(cls, value: object) -> int:  # Ensure weight stays at 1
+        return 1
 
 class Rubric(BaseModel):  # Rubric payload returned by LLM
     competency: str
@@ -34,7 +38,38 @@ class Rubric(BaseModel):  # Rubric payload returned by LLM
     criteria: List[RubricCriterion] = Field(min_length=3)
     red_flags: List[str] = Field(default_factory=list)
     evidence: List[str] = Field(min_length=3)
-    min_pass_score: float = Field(ge=0.0)
+    min_pass_score: int = Field(ge=1, le=5)
+
+    @field_validator("min_pass_score", mode="before")
+    @classmethod
+    def _normalize_min_pass(cls, value: object) -> int:  # Clamp pass score into 1-5 integers
+        try:
+            numeric = int(round(float(value)))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 3
+        return max(1, min(5, numeric))
+
+
+class CompetencyDefaultsEntry(BaseModel):  # Competency-specific rubric defaults
+    competency: str
+    criteria: List[str] = Field(min_length=3, max_length=3)
+    note: str = ""
+
+    @field_validator("competency", "note", mode="before")
+    @classmethod
+    def _strip_text(cls, value: object) -> str:
+        return str(value).strip() if value is not None else ""
+
+    @field_validator("criteria", mode="after")
+    @classmethod
+    def _clean_criteria(cls, value: List[str]) -> List[str]:
+        cleaned = [item.strip() for item in value if item and item.strip()]  # type: ignore[arg-type]
+        return cleaned[:3]
+
+
+class CompetencyDefaultsPlan(BaseModel):  # LLM response describing competency defaults
+    overview: str = ""
+    competencies: List[CompetencyDefaultsEntry] = Field(default_factory=list)
 
 
 class InterviewRubricSnapshot(BaseModel):  # Stored interview rubric response
@@ -190,10 +225,19 @@ def design_rubrics(
     route: LlmRoute,
     store: RubricStore,
     job_description: str,
+    defaults_route: LlmRoute | None = None,
 ) -> str:  # Generate rubrics and persist
     band = _infer_band(matrix.experience_years)
     rubrics: List[Rubric] = []
     areas = list(matrix.competency_areas)
+    defaults_cfg = defaults_route or route
+    defaults_plan = _safe_competency_defaults(
+        job_title=matrix.job_title,
+        experience_years=matrix.experience_years,
+        job_description=job_description,
+        route=defaults_cfg,
+    )
+    defaults_block = _render_defaults_block(defaults_plan)
     for index, raw_area in enumerate(areas):
         if isinstance(raw_area, CompetencyArea):
             area = raw_area
@@ -202,7 +246,7 @@ def design_rubrics(
         else:
             name, skills = _coerce_area_tuple(raw_area)
             area = CompetencyArea(name=name, skills=skills)
-        task = _build_task(area, band)
+        task = _build_task(area, band, defaults_block)
         rubric = call(task, Rubric, cfg=route)
         rubrics.append(rubric)
         # if index < len(areas) - 1:
@@ -225,10 +269,21 @@ def design_with_config(
     db_path: Path,
     job_description: str,
 ) -> str:  # Generate rubrics using config
-    registry = load_app_registry(config_path, {"rubric_design.generate_rubric": Rubric})
+    schemas = {
+        "rubric_design.generate_rubric": Rubric,
+        "rubric_design.generate_defaults": CompetencyDefaultsPlan,
+    }
+    registry = load_app_registry(config_path, schemas)
     route, _ = registry["rubric_design.generate_rubric"]
+    defaults_route, _ = registry["rubric_design.generate_defaults"]
     store = RubricStore(db_path)
-    return design_rubrics(matrix, route=route, store=store, job_description=job_description)
+    return design_rubrics(
+        matrix,
+        route=route,
+        store=store,
+        job_description=job_description,
+        defaults_route=defaults_route,
+    )
 
 
 def load_rubrics(interview_id: str, *, db_path: Path) -> InterviewRubricSnapshot:  # Load stored rubrics
@@ -236,7 +291,7 @@ def load_rubrics(interview_id: str, *, db_path: Path) -> InterviewRubricSnapshot
     return store.load(interview_id)
 
 
-def _build_task(area: CompetencyArea, band: BandLiteral) -> str:  # Build rubric design prompt
+def _build_task(area: CompetencyArea, band: BandLiteral, defaults_block: str) -> str:  # Build rubric design prompt
     prompt = dedent(
         """
         You are a rubric generator for verbal-only technical interviews. No coding, no drawing. Judge explanation quality, correctness, trade-offs, edge-case reasoning, and concrete experience.
@@ -244,33 +299,37 @@ def _build_task(area: CompetencyArea, band: BandLiteral) -> str:  # Build rubric
         Input:
         {"competency": "%(competency)s", "band": "%(band)s"}
 
-        Band scopes
-        0–1=task/feature, guided; 2–3=component, some guidance; 4–6=service, independent; 7–10=multi-service, leads; 10+=org/system, sets direction.
+        Band scale (integers 1-5):
+        1 = guided task or feature ownership.
+        2 = component delivery with light guidance.
+        3 = service or major feature ownership independently.
+        4 = multi-service or cross-team leadership.
+        5 = organization or platform direction setting.
 
-        Defaults by competency (verbal, 4×0.25):
+        Use the integer band level to choose the output label:
+        1 -> "0-1", 2 -> "2-3", 3 -> "4-6", 4 -> "7-10", 5 -> "10+".
+        Mention the integer level in the first band_note to keep the scale explicit.
 
-        * Backend Development: API Concepts & Contracts; State/Concurrency/Resilience; Performance & Data Flow; Security & Data Handling
-        * Front-End Engineering: Web Platform Fundamentals; State & Data Flow; Performance Reasoning; Quality Mindset
-        * Database & Query Optimization: Modeling & Keys; Query & Index Reasoning; Transactions & Consistency; Caching & Access Patterns
-        * Cloud & DevOps Practices: CI/CD & Rollback; Infra Basics (Containers/IaC); Monitoring & Alerting; Cost & Security Posture
-        * Software Quality & Maintenance: Test Strategy; Refactoring & Code Health; Docs & Change Management; Defect Prevention & RCA
-        * If competency unrecognized, create 3–5 verbal criteria totaling 1.0.
+        {defaults_block}
+        Anchor semantics: level integers 1-5 must align with increasing mastery.
+        1 = incorrect or purely theoretical.
+        2 = surface recall with limited depth.
+        3 = correct for the band with concrete examples.
+        4 = structured reasoning, balanced trade-offs, anticipates risks.
+        5 = teaches others, covers edge cases, proactive mitigation.
 
-        Anchor semantics (verbal):
-        1=incorrect/hand-wavy; 2=surface recall; 3=correct for band with examples; 4=clear structure and trade-offs; 5=precise, anticipates pitfalls, teaches.
-
-        Min pass score by band: 0–1:3.0, 2–3:3.2, 4–6:3.4, 7–10:3.6, 10+:3.8.
+        Minimum passing score: choose an integer 1-5, typically matching the band level. Never use decimals.
 
         Output strict JSON only
 
         {
           "competency": string,
           "band": "0-1" | "2-3" | "4-6" | "7-10" | "10+",
-          "band_notes": ["Verbal-only signals", "Scope: ...", "Autonomy: ..."],
+          "band_notes": ["Level 3: ...", "Scope: ...", "Autonomy: ..."],
           "criteria": [
             {
               "name": string,
-              "weight": number,
+              "weight": 1,
               "anchors": [
                 {"level":1,"text":string},
                 {"level":2,"text":string},
@@ -288,15 +347,22 @@ def _build_task(area: CompetencyArea, band: BandLiteral) -> str:  # Build rubric
         Strict requirements:
         - Return a single JSON object only (no markdown fences, no prose).
         - Populate every field exactly as shown above; never omit required keys.
-        - Provide 3 criteria per competency. Weights must sum to 1.0, use decimals.
+        - Provide exactly three criteria per competency.
+        - Set weight to the integer 1 for every criterion.
         - For every criterion, return exactly five anchors covering levels 1 through 5. Do not omit any level.
-        - Supply 3-5 "evidence" probes and at least one "red_flags" item (use [] only if none exist).
+        - Supply three "evidence" probes and three "red_flags" item (use [] only if none exist).
         - Use plain ASCII quotes and characters.
+        - Ensure every anchor description names the level integer directly.
+        - Set min_pass_score as an integer between 1 and 5.
 
-        Guidance for anchors: tailor to band scope; emphasize definitions, when-to-use, trade-offs, failure modes, and concrete examples from experience.
+        Guidance for anchors: tailor to the band's autonomy expectations; emphasize definitions, when-to-use, trade-offs, failure modes, and concrete experience.
         """
     ).strip()
-    return prompt % {"competency": area.name, "band": band}
+    return prompt % {
+        "competency": area.name,
+        "band": band,
+        "defaults_block": defaults_block,
+    }
 
 
 def _infer_band(experience_years: str) -> BandLiteral:  # Map experience text to band literal
@@ -318,6 +384,105 @@ def _infer_band(experience_years: str) -> BandLiteral:  # Map experience text to
     if value <= 10:
         return "7-10"
     return "10+"
+
+
+def _safe_competency_defaults(
+    *,
+    job_title: str,
+    experience_years: str,
+    job_description: str,
+    route: LlmRoute,
+) -> CompetencyDefaultsPlan:  # Query LLM for competency defaults with fallback
+    try:
+        return generate_competency_defaults(
+            job_title=job_title,
+            experience_years=experience_years,
+            job_description=job_description,
+            route=route,
+        )
+    except Exception:
+        return CompetencyDefaultsPlan()
+
+
+def generate_competency_defaults(
+    *,
+    job_title: str,
+    experience_years: str,
+    job_description: str,
+    route: LlmRoute,
+) -> CompetencyDefaultsPlan:  # Fetch competency default criteria guidance
+    task = _build_defaults_task(job_title, experience_years, job_description)
+    return call(task, CompetencyDefaultsPlan, cfg=route)
+
+
+def _build_defaults_task(job_title: str, experience_years: str, job_description: str) -> str:  # Assemble defaults prompt
+    prompt = dedent(
+        """
+        You analyze job descriptions and summarize competency defaults for verbal interview rubrics.
+        Return JSON only.
+
+        Schema:
+        {
+          "overview": string,
+          "competencies": [
+            {
+              "competency": string,
+              "criteria": [string, string, string],
+              "note": string
+            }
+          ]
+        }
+
+        Rules:
+        - Focus on the job's core competencies.
+        - Criteria must be short verbal skills or behaviours.
+        - Always produce exactly four competency entries.
+        - Use exactly three criteria per competency.
+        - Keep "note" empty when nothing important stands out.
+        - Overview should mention the interview focus.
+        - Reply with a single JSON object matching the schema.
+
+        Input:
+        {"job_title": "%(job_title)s", "experience_years": "%(experience_years)s", "job_description": "%(job_description)s"}
+        """
+    ).strip()
+    return prompt % {
+        "job_title": job_title.strip(),
+        "experience_years": experience_years.strip(),
+        "job_description": _truncate(job_description),
+    }
+
+
+def _render_defaults_block(plan: CompetencyDefaultsPlan) -> str:  # Render defaults heading for rubric prompt
+    lines: List[str] = ["Defaults by competency (verbal, 3 criteria):", ""]
+    entries = plan.competencies or []
+    seen: Dict[str, bool] = {}
+    for entry in entries:
+        key = entry.competency.lower()
+        if not entry.competency or key in seen:
+            continue
+        seen[key] = True
+        details = "; ".join(entry.criteria) if entry.criteria else ""
+        note = f"; {entry.note}" if entry.note else ""
+        lines.append(f"* {entry.competency}: {details}{note}")
+    if len(lines) == 2:
+        lines.extend(_STATIC_DEFAULTS)
+    lines.append("* If competency unrecognized, create exactly three verbal criteria with weight 1 each.")
+    return "\n".join(lines)
+
+
+def _truncate(value: str, limit: int = 2000) -> str:  # Trim long descriptions for prompt safety
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+_STATIC_DEFAULTS = [
+    "* Backend Development: API Concepts & Contracts; Resilience; Data Flow; Security & Compliance",
+    "* Front-End Engineering: Web Platform Fundamentals; State Management; Performance; Quality Mindset",
+    "* Cloud & DevOps Practices: CI/CD; Infrastructure as Code; Observability; Reliability",
+]
 
 
 def _coerce_area_tuple(raw_area: object) -> tuple[str, List[str]]:  # Normalize tuple/list competency data

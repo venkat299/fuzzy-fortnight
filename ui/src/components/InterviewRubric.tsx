@@ -108,7 +108,7 @@ export function InterviewRubric({ data, onBack, onBackToDashboard }: InterviewRu
                 <div>
                   <CardTitle>{rubric.competency}</CardTitle>
                   <CardDescription>
-                    Band {rubric.band} • Minimum passing score {rubric.minPassScore.toFixed(1)}
+                    Band {rubric.band} • Minimum passing score {rubric.minPassScore}
                   </CardDescription>
                 </div>
                 <Badge variant="outline">{rubric.band}</Badge>
@@ -139,7 +139,7 @@ export function InterviewRubric({ data, onBack, onBackToDashboard }: InterviewRu
                     {rubric.criteria.map((criterion) => (
                       <tr key={criterion.name} className="border-t">
                         <td className="align-top px-4 py-3 font-medium">{criterion.name}</td>
-                        <td className="align-top px-4 py-3 text-muted-foreground">{criterion.weight.toFixed(2)}</td>
+                        <td className="align-top px-4 py-3 text-muted-foreground">{criterion.weight}</td>
                         {[1, 2, 3, 4, 5].map((level) => {
                           const anchor = criterion.anchors.find((item) => item.level === level);
                           return (

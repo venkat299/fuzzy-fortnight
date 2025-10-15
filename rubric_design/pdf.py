@@ -128,7 +128,7 @@ def _render_rubric(pdf: RubricPDF, rubric: Rubric) -> None:  # Render rubric sec
     pdf.set_x(pdf.l_margin)
     pdf.set_text_color(*TEXT)
     pdf.set_font(pdf._font_regular, "", 11)
-    pdf.cell(0, 6, f"Minimum passing score {rubric.min_pass_score:.1f}", ln=1)
+    pdf.cell(0, 6, f"Minimum passing score {rubric.min_pass_score}", ln=1)
     if rubric.band_notes:
         _subheading(pdf, "Band Notes")
         _bullet_list(pdf, rubric.band_notes)
@@ -144,7 +144,7 @@ def _render_rubric(pdf: RubricPDF, rubric: Rubric) -> None:  # Render rubric sec
 
 def _render_criteria(pdf: RubricPDF, criteria: Iterable[RubricCriterion]) -> None:  # Render criteria with anchors
     for criterion in criteria:
-        name = f"{criterion.name} (weight {criterion.weight:.2f})"
+        name = f"{criterion.name} (weight {criterion.weight})"
         _subheading(pdf, name)
         anchors = sorted(criterion.anchors, key=lambda item: item.level)
         for anchor in anchors:
