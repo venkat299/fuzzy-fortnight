@@ -362,7 +362,7 @@ export function InterviewSessionPage({
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="rounded-lg border bg-background p-4">
-              <ScrollArea className="h-[25rem] pr-4">
+              <ScrollArea className="min-h-[20rem] max-h-[60vh] pr-4">
                 <div className="flex flex-col gap-4">
                   {chatMessages.map((message) => (
                     <div
