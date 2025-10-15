@@ -1,14 +1,15 @@
 from __future__ import annotations  # Evaluator agent scoring answers and maintaining memory
 
 from textwrap import dedent
-from typing import Dict, Iterable, List, Mapping, Sequence, Type
+from typing import Dict, List, Mapping, Sequence, Type
 
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
 
 from config import LlmRoute
-from llm_gateway import call
+from llm_gateway import runnable as llm_runnable
 from ..models import ChatTurn, CompetencyScore, FlowState
+from .toolkit import bullet_list, clamp_text, transcript_messages
 
 
 EVALUATOR_AGENT_KEY = "flow_manager.evaluator_agent"  # Registry key for evaluator agent configuration
@@ -41,6 +42,7 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
         self._prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", "{instructions}"),
+                MessagesPlaceholder("history"),
                 (
                     "human",
                     (
@@ -54,18 +56,14 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
                         "Rubric Criteria:\n{rubric}\n\n"
                         "Historical Criterion Levels:\n{levels}\n"
                         "Historical Competency Score: {existing_score}\n\n"
-                        "Guidelines:\n"
-                        "- Update only the rubric criteria listed above.\n"
-                        "- Preserve or raise previously achieved levels and scores.\n"
-                        "- Explain any adjustments in rubric updates.\n\n"
-                        "Recent Conversation Window:\n{history}\n\n"
                         "Latest Question: {question}\n"
                         "Candidate Answer: {answer}\n\n"
-                        "Return JSON with updated summary, anchors, rubric updates, and scores."
+                        "Return JSON with updated_summary, anchors, rubric_updates, and scores respecting the schema."
                     ),
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def invoke(
         self,
@@ -81,23 +79,24 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
         criteria = state.context.competency_criteria.get(competency, [])
         baseline_levels = state.context.competency_criterion_levels.get(competency, {})
         prior_score = state.context.evaluator.scores.get(competency)
-        task = self._prompt.format(
-            instructions=EVALUATOR_GUIDANCE,
-            stage=stage,
-            active_competency=competency or "(not set)",
-            job_title=state.context.job_title,
-            job_description=_clamp(state.context.job_description),
-            resume_summary=_clamp(state.context.resume_summary),
-            competencies=_format_competencies(state.context.competency_pillars),
-            summary=summary or "(no summary yet)",
-            rubric=_format_rubric(criteria),
-            levels=_format_levels(criteria, baseline_levels, prior_score),
-            existing_score=_format_score(prior_score),
-            history=_format_history(history),
-            question=question.content.strip(),
-            answer=answer.content.strip(),
+        plan = self._chain.invoke(
+            {
+                "instructions": EVALUATOR_GUIDANCE,
+                "history": transcript_messages(history),
+                "stage": stage,
+                "active_competency": competency or "(not set)",
+                "job_title": state.context.job_title,
+                "job_description": clamp_text(state.context.job_description, limit=900),
+                "resume_summary": clamp_text(state.context.resume_summary, limit=900),
+                "competencies": bullet_list(state.context.competency_pillars),
+                "summary": summary or "(no summary yet)",
+                "rubric": _format_rubric(criteria),
+                "levels": _format_levels(criteria, baseline_levels, prior_score),
+                "existing_score": _format_score(prior_score),
+                "question": question.content.strip(),
+                "answer": answer.content.strip(),
+            }
         )
-        plan = call(task, self._schema, cfg=self._route)
         anchors = [_clean_line(item) for item in plan.anchors if _clean_line(item)]
         updates = [_clean_line(item) for item in plan.rubric_updates if _clean_line(item)]
         scores: List[CompetencyScore] = []
@@ -178,22 +177,6 @@ def _recent_history(messages: Sequence[ChatTurn], window: int) -> List[ChatTurn]
     return list(messages[-window:])
 
 
-def _format_history(messages: Iterable[ChatTurn]) -> str:  # Format transcript window for prompt context
-    lines: List[str] = []
-    for turn in messages:
-        speaker = turn.speaker.strip() or "Unknown"
-        content = turn.content.strip() or "(no content)"
-        lines.append(f"{speaker}: {content}")
-    return "\n".join(lines) if lines else "(no prior exchanges)"
-
-
-def _format_competencies(items: Iterable[str]) -> str:  # Render competency pillars as bullet list
-    values = [_clean_line(item) for item in items if _clean_line(item)]
-    if not values:
-        return "(no competencies provided)"
-    return "\n".join(f"- {value}" for value in values)
-
-
 def _format_rubric(criteria: Sequence[str]) -> str:  # Format rubric criteria for evaluator context
     items = [_clean_line(item) for item in criteria if _clean_line(item)]
     if not items:
@@ -232,13 +215,6 @@ def _format_score(existing: CompetencyScore | None) -> str:  # Describe prior co
     if not existing:
         return "No prior competency score recorded."
     return f"{existing.score:.2f} / 5.00"
-
-
-def _clamp(text: str, limit: int = 900) -> str:  # Clamp long context strings for the evaluator prompt
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
 
 
 def _clean_line(text: str) -> str:  # Normalize whitespace on evaluator outputs

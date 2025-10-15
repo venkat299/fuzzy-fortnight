@@ -7,7 +7,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel
 
 from config import LlmRoute
-from llm_gateway import call
+from llm_gateway import runnable as llm_runnable
 
 
 PERSONA_AGENT_KEY = "flow_manager.persona_agent"  # Registry key for persona agent configuration
@@ -48,11 +48,11 @@ class PersonaAgent:  # Agent invoking persona LLM route
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def generate(self, *, brief: str, draft_question: str) -> str:  # Execute persona agent and return formatted question
         draft = draft_question.strip() or "(no draft provided)"
-        task = self._prompt.format(brief=brief, draft_question=draft)
-        result = call(task, self._schema, cfg=self._route)
+        result = self._chain.invoke({"brief": brief, "draft_question": draft})
         return result.question.strip()
 
 

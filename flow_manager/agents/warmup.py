@@ -1,14 +1,15 @@
 from __future__ import annotations  # Warmup agent generating rapport-building prompts
 
 from textwrap import dedent
-from typing import Iterable, List, Sequence, Type
+from typing import List, Sequence, Type
 
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
 
 from config import LlmRoute
-from llm_gateway import call
+from llm_gateway import runnable as llm_runnable
 from ..models import ChatTurn, FlowState
+from .toolkit import bullet_list, clamp_text, transcript_messages
 from .persona import PersonaAgent
 
 
@@ -43,6 +44,7 @@ class WarmupAgent:  # Agent coordinating warmup plan and persona delivery
         self._prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", "{instructions}"),
+                MessagesPlaceholder("history"),
                 (
                     "human",
                     (
@@ -51,27 +53,29 @@ class WarmupAgent:  # Agent coordinating warmup plan and persona delivery
                         "Candidate: {candidate_name}\n"
                         "Resume Summary:\n{resume_summary}\n"
                         "Highlighted Experiences:\n{highlighted_experiences}\n\n"
-                        "Conversation so far:\n{conversation_history}\n\n"
-                        "Describe the warmup objective for a persona question writer."
-                        " Provide an intermediate interviewer question that captures the intent"
-                        " so the persona agent can humanize it."
+                        "Warmup Objective:\n{objective}\n\n"
+                        "Draft a JSON object with persona_brief, draft_question, tone, and notes"
+                        " capturing the interviewer plan for the persona agent."
                     ),
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def invoke(self, state: FlowState, *, use_persona: bool = True) -> FlowState:  # Run the warmup agent against flow state
         context = state.context
-        task = self._prompt.format(
-            instructions=WARMUP_GUIDANCE,
-            stage=context.stage,
-            job_title=context.job_title,
-            candidate_name=context.candidate_name,
-            resume_summary=_format_resume(context.resume_summary),
-            highlighted_experiences=_format_highlights(context.highlighted_experiences),
-            conversation_history=_format_conversation(state.messages),
+        plan = self._chain.invoke(
+            {
+                "instructions": WARMUP_GUIDANCE,
+                "history": transcript_messages(state.messages),
+                "stage": context.stage,
+                "job_title": context.job_title,
+                "candidate_name": context.candidate_name,
+                "resume_summary": clamp_text(context.resume_summary),
+                "highlighted_experiences": bullet_list(context.highlighted_experiences),
+                "objective": clamp_text(getattr(context, "warmup_objective", "Build rapport.")),
+            }
         )
-        plan = call(task, self._schema, cfg=self._route)
         tone = (plan.tone or "positive").strip().lower()
         if tone not in {"neutral", "positive"}:
             tone = "neutral"
@@ -94,39 +98,12 @@ class WarmupAgent:  # Agent coordinating warmup plan and persona delivery
                 "messages": state.messages + [message],
             }
         )
-
-
-def _format_highlights(entries: Iterable[str]) -> str:  # Format highlighted experiences as bullet list
-    lines = [entry.strip() for entry in entries if entry and entry.strip()]
-    if not lines:
-        return "None provided."
-    return "\n".join(f"- {line}" for line in lines)
-
-
-def _format_resume(summary: str, limit: int = 600) -> str:  # Clamp resume summary for prompt hygiene
-    compact = " ".join(summary.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
-
-
-def _format_conversation(messages: Sequence[ChatTurn]) -> str:  # Summarize existing conversation for warmup agent
-    if not messages:
-        return "(none)"
-    lines: List[str] = []
-    for turn in messages:
-        speaker = turn.speaker.strip() or "Unknown"
-        content = turn.content.strip() or "(no content)"
-        lines.append(f"{speaker}: {content}")
-    return "\n".join(lines)
-
-
 def _build_persona_brief(state: FlowState, plan: WarmupPlan, tone: str) -> str:  # Assemble persona brief for warmup question
     context = state.context
     notes = [note.strip() for note in plan.notes if note.strip()]
-    highlighted = _format_highlights(context.highlighted_experiences)
-    conversation = _format_conversation(state.messages)
-    summary = _format_resume(context.resume_summary)
+    highlighted = bullet_list(context.highlighted_experiences)
+    conversation = _format_conversation_text(state.messages)
+    summary = clamp_text(context.resume_summary)
     focus = plan.persona_brief.strip() or "Build rapport while referencing the candidate background."
     lines = [
         "You are the interviewer persona crafting a natural warmup prompt.",
@@ -179,3 +156,14 @@ __all__ = [
     "WarmupAgent",
     "WarmupPlan",
 ]
+
+
+def _format_conversation_text(messages: Sequence[ChatTurn]) -> str:  # Human-readable conversation summary
+    if not messages:
+        return "(none)"
+    lines: List[str] = []
+    for turn in messages:
+        speaker = turn.speaker.strip() or "Unknown"
+        content = turn.content.strip() or "(no content)"
+        lines.append(f"{speaker}: {content}")
+    return "\n".join(lines)

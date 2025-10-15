@@ -4,11 +4,13 @@ import json
 import logging
 import os
 import threading
-from typing import Any, Callable, Dict, Optional, Protocol, Tuple, Type, TypeVar
+from typing import Any, Callable, Dict, Iterable, Optional, Protocol, Sequence, Tuple, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from config import LlmRoute
+from langchain_core.messages import BaseMessage
+from langchain_core.runnables import RunnableLambda
 
 
 logger = logging.getLogger(__name__)  # Module logger setup
@@ -57,17 +59,35 @@ def call(
     client: Optional[HttpClient] = None,
     options: Optional[Dict[str, Any]] = None,
 ) -> T:  # Invoke configured LLM route and validate output
+    return chat(
+        [{"role": "user", "content": task}],
+        schema,
+        cfg=cfg,
+        client=client,
+        options=options,
+    )
+
+
+def chat(
+    messages: Sequence[Dict[str, str]],
+    schema: Type[T],
+    *,
+    cfg: LlmRoute,
+    client: Optional[HttpClient] = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> T:
     def _execute() -> T:
-        base_messages = []
+        input_messages = _normalize_messages(messages)
+        base_messages: list[Dict[str, str]] = []
         if cfg.enforce_json:
             schema_json = json.dumps(schema.model_json_schema(), indent=2)
             system_prompt = "Reply with a single JSON object matching this schema:\n" + schema_json
             base_messages.append({"role": "system", "content": system_prompt})
-        base_messages.append({"role": "user", "content": task})
+        base_messages.extend(input_messages)
         attempts = cfg.max_retries + 1
         last_error: Optional[Exception] = None
         last_error_text: Optional[str] = None
-        preview = task.strip().splitlines()[0] if task.strip() else ""
+        preview = _preview(base_messages)
         if len(preview) > 120:
             preview = preview[:117] + "..."
         logger.info(
@@ -78,15 +98,15 @@ def call(
             preview,
         )
         for attempt in range(attempts):
-            messages = list(base_messages)
+            attempt_messages = list(base_messages)
             if attempt > 0:
-                messages.append(
+                attempt_messages.append(
                     {
                         "role": "system",
                         "content": _retry_hint(last_error_text, cfg.enforce_json),
                     }
                 )
-            payload: Dict[str, Any] = {"model": cfg.model, "messages": messages}
+            payload: Dict[str, Any] = {"model": cfg.model, "messages": attempt_messages}
             if options:
                 payload.update(options)
             if cfg.response_format:
@@ -144,6 +164,14 @@ def call(
     return _execute()
 
 
+def runnable(route: LlmRoute, schema: Type[T]) -> RunnableLambda:  # Provide runnable interface for LangChain pipelines
+    def _invoke(payload: Any) -> T:
+        messages = _coerce_messages(payload)
+        return chat(messages, schema, cfg=route)
+
+    return RunnableLambda(_invoke)
+
+
 def _post(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: float, client: Optional[HttpClient]) -> Tuple[HttpResponse, Optional[Callable[[], None]]]:  # Dispatch HTTP request
     if client is not None:
         response = client.post(url, json=payload, headers=headers, timeout=timeout)
@@ -163,6 +191,27 @@ def _post(url: str, payload: Dict[str, Any], headers: Dict[str, str], timeout: f
 def _close_safely(close_cb: Optional[Callable[[], None]]) -> None:  # Close HTTP client callback when provided
     if close_cb is not None:
         close_cb()
+
+
+def _normalize_messages(messages: Sequence[Dict[str, str]]) -> list[Dict[str, str]]:  # Ensure message payload shape
+    normalized: list[Dict[str, str]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            raise TypeError("Each chat message must be a dict with role/content")
+        role = str(item.get("role", "")).strip()
+        content = str(item.get("content", ""))
+        if not role:
+            raise ValueError("Chat message missing role")
+        normalized.append({"role": role, "content": content})
+    return normalized
+
+
+def _preview(messages: Sequence[Dict[str, str]]) -> str:  # Build preview string for logging
+    for message in messages:
+        text = message.get("content", "").strip()
+        if text:
+            return text.splitlines()[0]
+    return ""
 
 
 def _extract_content(data: Any) -> str:  # Extract message content from LLM response
@@ -218,3 +267,30 @@ def _retry_hint(error_text: Optional[str], enforce_json: bool) -> str:  # Compos
     if enforce_json:
         return base + " Return a single JSON object that matches the schema."
     return base + " Follow the requested format precisely."
+
+
+def _coerce_messages(payload: Any) -> Sequence[Dict[str, str]]:  # Convert LangChain payloads into dict messages
+    if hasattr(payload, "to_messages"):
+        payload = payload.to_messages()
+    if isinstance(payload, dict):
+        return [payload]
+    if isinstance(payload, BaseMessage):
+        return [_message_dict(payload)]
+    if isinstance(payload, (list, tuple)):
+        if all(isinstance(item, dict) for item in payload):
+            return list(payload)  # type: ignore[return-value]
+        if all(isinstance(item, BaseMessage) for item in payload):
+            return [_message_dict(item) for item in payload]
+    raise TypeError("Unsupported message payload for LLM runnable")
+
+
+def _message_dict(message: BaseMessage) -> Dict[str, str]:  # Map LangChain BaseMessage to role/content dict
+    role = message.type
+    if role == "human":
+        role = "user"
+    elif role == "ai":
+        role = "assistant"
+    content = message.content
+    if not isinstance(content, str):
+        content = json.dumps(content)
+    return {"role": role, "content": content}

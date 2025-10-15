@@ -9,12 +9,11 @@ from textwrap import dedent
 from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple, Type
 
 from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field, model_validator
 
 from config import AppConfig, LlmRoute, NoisySettings, load_config, resolve_registry, load_app_registry
-from llm_gateway import call
+from llm_gateway import call, runnable as llm_runnable
 
 AUTO_REPLY_AGENT_KEY = "candidate_agent.auto_reply"  # Registry key for candidate auto replies
 NOISY_AGENT_KEY = "candidate_agent.noisy_candidate"  # Registry key for noisy candidate answers
@@ -432,6 +431,7 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
                         """
                     ).strip(),
                 ),
+                MessagesPlaceholder("history"),
                 (
                     "human",
                     (
@@ -439,7 +439,7 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
                         "Active Competency: {competency}\n"
                         "Project Anchor: {project_anchor}\n"
                         "Targeted Criteria:\n{targeted}\n\n"
-                        "Conversation Memory:\n{conversation}\n\n"
+                        "Conversation memory appears above.\n"
                         "Interviewer Prompt: {question}\n"
                         "Candidate reply depth level: {level}\n"
                         "Respond as the candidate with a concise, human answer."
@@ -447,6 +447,7 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def invoke(
         self,
@@ -456,22 +457,23 @@ class AutoReplyAgent:  # Agent generating candidate responses from memory contex
         level: int,
     ) -> AutoReplyOutcome:  # Run the auto-reply agent and update memory
         history = _build_history(memory.history)
-        conversation = _format_history(history)
+        history_messages = history.messages
         competency = memory.competency or "general competency focus"
         anchor = memory.project_anchor.strip() or "(no shared project anchor)"
         normalized_level = _normalized_level(level)
         noisy_style = PromptLibrary.get(normalized_level)
-        task = self._prompt.format(
-            resume_summary=_clamp(memory.resume_summary),
-            conversation=conversation,
-            question=question.strip(),
-            noisy_style=noisy_style,
-            level=str(normalized_level),
-            competency=competency,
-            project_anchor=anchor,
-            targeted=_format_targets(memory.targeted_criteria),
+        plan = self._chain.invoke(
+            {
+                "history": history_messages,
+                "resume_summary": _clamp(memory.resume_summary),
+                "question": question.strip(),
+                "noisy_style": noisy_style,
+                "level": str(normalized_level),
+                "competency": competency,
+                "project_anchor": anchor,
+                "targeted": _format_targets(memory.targeted_criteria),
+            }
         )
-        plan = call(task, self._schema, cfg=self._route)
         processor = _get_noisy_processor()
         answer = processor.apply(plan.answer.strip(), normalized_level)
         qa = QuestionAnswer(
@@ -529,19 +531,6 @@ def _build_history(history: Sequence[QuestionAnswer]) -> InMemoryChatMessageHist
         if answer:
             chat_history.add_ai_message(answer)
     return chat_history
-
-
-def _format_history(history: InMemoryChatMessageHistory) -> str:  # Serialize memory into prompt text
-    messages = history.messages
-    if not messages:
-        return "(none)"
-    lines: List[str] = []
-    for message in messages:
-        if isinstance(message, HumanMessage):
-            lines.append(f"Interviewer: {message.content}")
-        elif isinstance(message, AIMessage):
-            lines.append(f"Candidate: {message.content}")
-    return "\n".join(lines) if lines else "(none)"
 
 
 def _format_targets(criteria: Sequence[str]) -> str:  # Format targeted criteria list for prompt context

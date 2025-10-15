@@ -2,13 +2,14 @@ from __future__ import annotations  # Competency primer agent for project anchor
 
 from pathlib import Path
 from textwrap import dedent
-from typing import Dict, Iterable, Sequence, Type
+from typing import Dict, Sequence, Type
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from config import LlmRoute, load_app_registry
-from llm_gateway import call
+from llm_gateway import runnable as llm_runnable
+from .toolkit import bullet_list, clamp_text
 
 
 COMPETENCY_PRIMER_AGENT_KEY = "flow_manager.competency_primer"  # Registry key for primer agent configuration
@@ -48,6 +49,7 @@ class CompetencyPrimerAgent:  # Agent that maps competencies to project anchors
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def invoke(
         self,
@@ -58,14 +60,15 @@ class CompetencyPrimerAgent:  # Agent that maps competencies to project anchors
         experiences: Sequence[str],
         competencies: Sequence[str],
     ) -> Dict[str, str]:  # Generate competency to project anchor mapping
-        task = self._prompt.format(
-            job_title=job_title,
-            job_description=_clamp(job_description),
-            resume_summary=_clamp(resume_summary),
-            highlighted=_format_list(experiences),
-            competencies=_format_list(competencies),
+        plan = self._chain.invoke(
+            {
+                "job_title": job_title,
+                "job_description": clamp_text(job_description, limit=900),
+                "resume_summary": clamp_text(resume_summary, limit=900),
+                "highlighted": bullet_list(experiences),
+                "competencies": bullet_list(competencies),
+            }
         )
-        plan = call(task, self._schema, cfg=self._route)
         return {key: value.strip() for key, value in plan.projects.items() if value and value.strip()}
 
 
@@ -89,20 +92,6 @@ def prime_competencies_with_config(
         experiences=experiences,
         competencies=competencies,
     )
-
-
-def _format_list(items: Iterable[str]) -> str:  # Convert iterable into bullet list string
-    values = [" ".join(entry.split()) for entry in items if entry and entry.strip()]
-    if not values:
-        return "(none)"
-    return "\n".join(f"- {value}" for value in values)
-
-
-def _clamp(text: str, limit: int = 900) -> str:  # Clamp lengthy strings for prompt hygiene
-    compact = " ".join(text.split())
-    if len(compact) <= limit:
-        return compact
-    return compact[: limit - 1].rstrip() + "…"
 
 
 __all__ = [

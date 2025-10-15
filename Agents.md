@@ -13,6 +13,13 @@ Updated Codex prompt:
 - Use Langraph and langchain wherever necessary for clean structuring and to avoid code bloat and config bloat
 - Implement each agent in its own module file under a dedicated package (no multiple agents per file).
 
+LangChain & LangGraph integration:
+
+- Build LLM calls as LangChain runnables: compose `ChatPromptTemplate` + `MessagesPlaceholder` with `llm_gateway.runnable` and optional parsers.
+- Feed transcripts via shared helpers that return LangChain message dicts instead of ad-hoc strings; reuse `flow_manager.agents.toolkit`.
+- Orchestrate agent sequencing with LangGraph `StateGraph` payloads rather than manual branching; keep node functions pure and pass flags via payload dictionaries.
+- Keep retry, JSON enforcement, and schema validation inside the gateway/runnable layer—callers should only handle domain-specific post-processing.
+
 Pydantic and JSON enforcement:
 
 - Use Pydantic wherever useful: config schema, request/response DTOs, domain entities, and LLM output schemas. Validate on load. Fail fast on errors.

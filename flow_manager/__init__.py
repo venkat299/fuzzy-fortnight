@@ -1,7 +1,7 @@
 from __future__ import annotations  # Interview flow orchestration using LangGraph
 
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple, Type
+from typing import Any, Callable, Dict, List, Sequence, Tuple, Type
 
 from langgraph.graph import END, StateGraph
 from pydantic import BaseModel
@@ -49,26 +49,18 @@ def start_session(
     )
     state = FlowState(context=seeded_context, messages=[], progress=progress)
     graph = StateGraph(dict)
-    graph.add_node("router", _identity)
-    graph.add_node(
-        "warmup",
-        lambda payload: _run_warmup(
-            warmup_agent,
-            settings,
-            _ensure_state(payload),
-        ).model_dump(),
-    )
-    graph.add_edge("warmup", END)
+    graph.add_node("warmup", lambda payload: _warmup_node(payload, warmup_agent, settings))
     graph.add_conditional_edges(
-        "router",
-        lambda payload: _route_start(_ensure_state(payload)),
+        "warmup",
+        lambda payload: _route_start(payload["state"]),
         {
             "warmup": "warmup",
             "end": END,
         },
     )
-    graph.set_entry_point("router")
-    final_state = FlowState.model_validate(graph.compile().invoke(state.model_dump()))
+    graph.set_entry_point("warmup")
+    final_payload = graph.compile().invoke({"state": state})
+    final_state = FlowState.model_validate(final_payload["state"].model_dump())
     return SessionLaunch(context=final_state.context, messages=final_state.messages)
 
 
@@ -112,38 +104,33 @@ def advance_session(
         return SessionLaunch(context=seeded_context, messages=[])
     question, answer, question_number = exchange
     stage = _stage_for_question(question_number, warmup_limit)
-    plan = evaluator.invoke(state, stage=stage, question=question, answer=answer)
-    (
-        evaluated_context,
-        evaluated_progress,
-        coverage_complete,
-        low_score_triggered,
-    ) = _apply_evaluation(
-        seeded_context,
-        state.progress,
-        plan,
-        stage,
-        warmup_limit,
-        question_number,
-        settings,
+    payload = {
+        "state": state,
+        "question": question,
+        "answer": answer,
+        "stage": stage,
+        "warmup_limit": warmup_limit,
+        "settings": settings,
+        "evaluator": evaluator,
+        "competency_agent": competency_agent,
+    }
+    graph = StateGraph(dict)
+    graph.add_node("evaluate", _build_evaluation_node(question_number))
+    graph.add_conditional_edges(
+        "evaluate",
+        _route_after_evaluation,
+        {
+            "competency": "competency",
+            "end": END,
+        },
     )
-    updated_state = FlowState(
-        context=evaluated_context,
-        messages=list(history),
-        progress=evaluated_progress,
-    )
-    if evaluated_context.stage != "competency":
-        return SessionLaunch(context=evaluated_context, messages=[])
-    routed_state = _drive_competency_loop(
-        updated_state,
-        competency_agent,
-        settings=settings,
-        answered_stage=stage,
-        coverage_complete=coverage_complete,
-        low_score_triggered=low_score_triggered,
-    )
-    followups = routed_state.messages[len(history) :]
-    return SessionLaunch(context=routed_state.context, messages=followups)
+    graph.add_node("competency", _competency_node)
+    graph.add_edge("competency", END)
+    graph.set_entry_point("evaluate")
+    result = graph.compile().invoke(payload)
+    final_state: FlowState = result["state"]
+    followups = final_state.messages[len(history) :]
+    return SessionLaunch(context=final_state.context, messages=followups)
 
 
 def advance_session_with_config(
@@ -192,6 +179,12 @@ def _run_warmup(agent: WarmupAgent, settings: FlowSettings, state: FlowState) ->
             }
         )
     return updated.model_copy(update={"context": context, "progress": progress})
+
+
+def _warmup_node(payload: Dict[str, Any], agent: WarmupAgent, settings: FlowSettings) -> Dict[str, Any]:  # LangGraph node wrapper
+    state = payload["state"]
+    updated = _run_warmup(agent, settings, state)
+    return {"state": updated}
 
 
 def _apply_evaluation(
@@ -248,6 +241,71 @@ def _apply_evaluation(
         )
         updated_progress = updated_progress.model_copy(update={"awaiting_stage": "competency"})
     return base_context, updated_progress, coverage_complete, low_score_triggered
+
+
+def _build_evaluation_node(question_number: int) -> Callable[[Dict[str, Any]], Dict[str, Any]]:  # LangGraph evaluation step
+    def _node(payload: Dict[str, Any]) -> Dict[str, Any]:
+        state: FlowState = payload["state"]
+        evaluator: EvaluatorAgent = payload["evaluator"]
+        settings: FlowSettings = payload["settings"]
+        warmup_limit: int = payload["warmup_limit"]
+        stage: str = payload["stage"]
+        question: ChatTurn = payload["question"]
+        answer: ChatTurn = payload["answer"]
+        plan = evaluator.invoke(state, stage=stage, question=question, answer=answer)
+        (
+            evaluated_context,
+            evaluated_progress,
+            coverage_complete,
+            low_score_triggered,
+        ) = _apply_evaluation(
+            state.context,
+            state.progress,
+            plan,
+            stage,
+            warmup_limit,
+            question_number,
+            settings,
+        )
+        updated_state = FlowState(
+            context=evaluated_context,
+            messages=list(state.messages),
+            progress=evaluated_progress,
+        )
+        payload.update(
+            {
+                "state": updated_state,
+                "coverage_complete": coverage_complete,
+                "low_score_triggered": low_score_triggered,
+                "answered_stage": stage,
+            }
+        )
+        return payload
+
+    return _node
+
+
+def _route_after_evaluation(payload: Dict[str, Any]) -> str:  # Decide LangGraph branch post evaluation
+    state: FlowState = payload["state"]
+    if state.context.stage != "competency":
+        return "end"
+    return "competency"
+
+
+def _competency_node(payload: Dict[str, Any]) -> Dict[str, Any]:  # Execute competency follow-up node
+    state: FlowState = payload["state"]
+    agent: CompetencyAgent = payload["competency_agent"]
+    settings: FlowSettings = payload["settings"]
+    routed_state = _drive_competency_loop(
+        state,
+        agent,
+        settings=settings,
+        answered_stage=payload.get("answered_stage", "competency"),
+        coverage_complete=payload.get("coverage_complete", False),
+        low_score_triggered=payload.get("low_score_triggered", False),
+    )
+    payload["state"] = routed_state
+    return payload
 
 
 def _drive_competency_loop(
@@ -667,18 +725,6 @@ def _dedupe(items: Sequence[str]) -> List[str]:  # Preserve order while removing
             seen.add(text)
             result.append(text)
     return result
-
-
-def _identity(payload: Dict[str, Any]) -> Dict[str, Any]:  # Identity node required by LangGraph entry
-    return payload
-
-
-def _ensure_state(payload: FlowState | Dict[str, Any]) -> FlowState:  # Normalize payload into FlowState
-    if isinstance(payload, FlowState):
-        return payload
-    if isinstance(payload, dict):
-        return FlowState.model_validate(payload)
-    raise TypeError("Unsupported state payload")
 
 
 __all__ = [

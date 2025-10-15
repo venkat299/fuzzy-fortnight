@@ -1,14 +1,15 @@
 from __future__ import annotations  # Competency follow-up agent for interview loop
 
 from textwrap import dedent
-from typing import Iterable, List, Sequence, Type
+from typing import List, Sequence, Type
 
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from pydantic import BaseModel, Field
 
 from config import LlmRoute
-from llm_gateway import call
+from llm_gateway import runnable as llm_runnable
 from ..models import ChatTurn, FlowState
+from .toolkit import bullet_list, clamp_text, transcript_messages
 from .persona import PersonaAgent
 
 
@@ -44,6 +45,7 @@ class CompetencyAgent:  # Agent generating competency-focused interviewer prompt
         self._prompt = ChatPromptTemplate.from_messages(
             [
                 ("system", "{instructions}"),
+                MessagesPlaceholder("history"),
                 (
                     "human",
                     (
@@ -53,16 +55,15 @@ class CompetencyAgent:  # Agent generating competency-focused interviewer prompt
                         "Competency Focus: {competency}\n"
                         "Current Project Anchor: {project_anchor}\n"
                         "Remaining Criteria:\n{remaining_criteria}\n\n"
-                        "Conversation so far:\n{conversation}\n\n"
                         "Question Index: {question_index}\n"
-                        "{instruction_block}"
-                        "\nSummarize the desired follow-up for a persona question writer."
-                        " Provide an intermediate interviewer question capturing the probing intent"
-                        " for the persona agent to humanize."
+                        "Instruction Block:\n{instruction_block}\n\n"
+                        "Return JSON with persona_brief, draft_question, tone, and targeted_criteria"
+                        " describing the interviewer plan."
                     ),
                 ),
             ]
         )
+        self._chain = self._prompt | llm_runnable(self._route, self._schema)
 
     def invoke(
         self,
@@ -74,18 +75,19 @@ class CompetencyAgent:  # Agent generating competency-focused interviewer prompt
         use_persona: bool = True,
     ) -> FlowState:  # Run competency agent to append interviewer question
         intro = _intro_text(state.context.question_index, competency)
-        task = self._prompt.format(
-            instructions=COMPETENCY_GUIDANCE,
-            job_title=state.context.job_title,
-            candidate_name=state.context.candidate_name,
-            competency=competency,
-            project_anchor=project_anchor or "(use a hypothetical if needed)",
-            remaining_criteria=_format_criteria(remaining_criteria),
-            conversation=_format_conversation(state.messages),
-            question_index=str(state.context.question_index),
-            instruction_block=intro,
+        plan = self._chain.invoke(
+            {
+                "instructions": COMPETENCY_GUIDANCE,
+                "history": transcript_messages(state.messages),
+                "job_title": state.context.job_title,
+                "candidate_name": state.context.candidate_name,
+                "competency": competency,
+                "project_anchor": project_anchor or "(use a hypothetical if needed)",
+                "remaining_criteria": _format_criteria(remaining_criteria),
+                "question_index": str(state.context.question_index),
+                "instruction_block": intro,
+            }
         )
-        plan = call(task, self._schema, cfg=self._route)
         tone = (plan.tone or "neutral").strip().lower()
         if tone not in {"neutral", "positive"}:
             tone = "neutral"
@@ -139,7 +141,7 @@ def _intro_text(question_index: int, competency: str) -> str:  # Build instructi
     return header + "\n" + intro
 
 
-def _format_conversation(messages: Iterable[ChatTurn]) -> str:  # Render transcript history for prompt
+def _format_conversation(messages: Sequence[ChatTurn]) -> str:  # Render transcript history for prompt
     lines: List[str] = []
     for turn in messages:
         speaker = turn.speaker.strip() or "Unknown"
@@ -169,8 +171,8 @@ def _build_persona_brief(
     targeted: Sequence[str],
 ) -> str:  # Assemble persona brief for competency question
     context = state.context
-    anchor = project_anchor.strip() or "Use a relevant project from the resume if possible."
-    focus = plan.persona_brief.strip() or "Advance evidence for the competency."
+    anchor = clamp_text(project_anchor.strip() or "Use a relevant project from the resume if possible.", limit=160)
+    focus = clamp_text(plan.persona_brief.strip() or "Advance evidence for the competency.", limit=200)
     conversation = _format_conversation(state.messages)
     remaining = [_clean_line(item) for item in remaining_criteria if _clean_line(item)]
     lines = [
@@ -184,10 +186,10 @@ def _build_persona_brief(
     ]
     if targeted:
         lines.append("Targeted criteria to probe:")
-        lines.extend(f"- {item}" for item in targeted)
+        lines.append(bullet_list(targeted))
     if remaining:
         lines.append("Remaining rubric criteria available:")
-        lines.extend(f"- {item}" for item in remaining)
+        lines.append(bullet_list(remaining))
     lines.extend(
         [
             "Conversation so far:",

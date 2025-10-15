@@ -15,5 +15,8 @@ class InMemoryChatMessageHistory:  # Stores alternating user/AI messages
     def add_ai_message(self, content: str) -> None:
         self.messages.append(AIMessage(content=content))
 
+    def as_messages(self) -> List[dict]:  # Return dict messages with role/content pairs
+        return [{"role": getattr(msg, "role", "user"), "content": msg.content} for msg in self.messages]
+
 
 __all__ = ["InMemoryChatMessageHistory"]
