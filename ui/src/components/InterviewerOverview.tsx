@@ -377,18 +377,33 @@ export function InterviewerOverview({
                               {formatDate(item.createdAt)}
                             </TableCell>
                             <TableCell className="flex justify-end">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="inline-flex items-center gap-1.5 rounded-full px-3"
-                                onClick={() => onViewRubric(item.interviewId)}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="inline-flex items-center gap-1.5 rounded-full px-3"
+                              onClick={() => onViewRubric(item.interviewId)}
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                              View rubric
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="ml-2 inline-flex items-center gap-1.5 rounded-full px-3"
+                              asChild
+                            >
+                              <a
+                                href={`/api/interviews/${item.interviewId}/rubric.pdf`}
+                                target="_blank"
+                                rel="noreferrer"
                               >
-                                <Eye className="h-3.5 w-3.5" />
-                                View rubric
-                              </Button>
-                            </TableCell>
-                          </TableRow>
-                        ))}
+                                <Download className="h-3.5 w-3.5" />
+                                Download rubric
+                              </a>
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
                         {isLoadingInterviews && renderSkeletonRows(6)}
                       </TableBody>
                     </Table>
