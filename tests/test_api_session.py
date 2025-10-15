@@ -31,7 +31,7 @@ def _rubric() -> Rubric:
     return Rubric(
         competency="Collaboration",
         band="4-6",
-        band_notes=["note"],
+        band_notes=["Stakeholder’s perspective"],
         criteria=_criteria(),
         red_flags=["flag"],
         evidence=["Facilitated cross-team workshop", "Mentored juniors", "Drove alignment"],
@@ -588,3 +588,23 @@ def test_session_report_endpoint_returns_transcript(monkeypatch, tmp_path) -> No
     assert pdf_response.status_code == 200
     assert pdf_response.headers["content-type"].startswith("application/pdf")
     assert pdf_response.content.startswith(b"%PDF")
+
+
+def test_rubric_pdf_download(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "rubrics.sqlite"
+    store = RubricStore(db_path)
+    interview_id = "pdf-role"
+    store.save(
+        interview_id=interview_id,
+        job_title="Staff Engineer",
+        experience_years="7-10",
+        job_description="Designs resilient distributed systems and mentors engineers.",
+        rubrics=[_rubric()],
+    )
+    monkeypatch.setattr(api_server, "DATA_PATH", db_path)
+    client = TestClient(api_server.app)
+    response = client.get(f"/api/interviews/{interview_id}/rubric.pdf")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert response.headers["content-disposition"].endswith('.pdf"')
+    assert response.content.startswith(b"%PDF")

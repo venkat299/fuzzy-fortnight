@@ -11,6 +11,7 @@ from .rubric_design import (
     design_with_config,
     load_rubrics,
 )
+from .pdf import generate_rubric_pdf
 
 __all__ = [
     "BandLiteral",
@@ -22,4 +23,5 @@ __all__ = [
     "design_rubrics",
     "design_with_config",
     "load_rubrics",
+    "generate_rubric_pdf",
 ]

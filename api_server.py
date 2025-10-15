@@ -28,6 +28,7 @@ from rubric_design import (
     InterviewRubricSnapshot,
     RubricStore,
     design_with_config as design_rubrics_with_config,
+    generate_rubric_pdf,
     load_rubrics,
 )
 from session_reports import SessionReport, SessionReportStore, generate_session_report_pdf
@@ -290,6 +291,19 @@ def fetch_interview_rubric(interview_id: str) -> InterviewRubricSnapshot:  # Ret
         return load_rubrics(interview_id, db_path=DATA_PATH)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Interview not found") from exc
+
+
+@app.get("/api/interviews/{interview_id}/rubric.pdf")
+def fetch_interview_rubric_pdf(interview_id: str) -> Response:  # Download rubric PDF
+    try:
+        snapshot = load_rubrics(interview_id, db_path=DATA_PATH)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Interview not found") from exc
+    payload = generate_rubric_pdf(snapshot)
+    safe_role = _safe_slug(snapshot.job_title)
+    filename = f"{snapshot.interview_id}-{safe_role or 'rubric'}.pdf"
+    headers = {"Content-Disposition": f"attachment; filename=\"{filename}\""}
+    return Response(content=payload, media_type="application/pdf", headers=headers)
 
 
 @app.post("/api/interviews/{interview_id}/session", response_model=StartSessionResponse)

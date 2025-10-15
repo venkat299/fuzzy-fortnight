@@ -1,7 +1,7 @@
 from __future__ import annotations  # Evaluator agent scoring answers and maintaining memory
 
 from textwrap import dedent
-from typing import Iterable, List, Sequence, Type
+from typing import Dict, Iterable, List, Mapping, Sequence, Type
 
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
@@ -19,6 +19,7 @@ EVALUATOR_GUIDANCE = dedent(  # Evaluation guardrails for rubric-aware scoring
     Maintain a conversation summary buffer while scoring candidate replies.
     Warmup stage: capture behavioral anchors only, no scores yet.
     Competency stage: update rubric scores, cite evidence, and refresh the running summary.
+    Never lower previously achieved rubric levels or competency scores; maintain or improve them.
     Always reply with calibrated anchors and concise rubric updates.
     """
 ).strip()
@@ -44,11 +45,19 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
                     "human",
                     (
                         "Interview Stage: {stage}\n"
+                        "Active Competency: {active_competency}\n"
                         "Job Title: {job_title}\n"
                         "Job Description:\n{job_description}\n\n"
                         "Resume Summary:\n{resume_summary}\n\n"
                         "Competency Pillars:\n{competencies}\n\n"
                         "Current Evaluator Summary:\n{summary}\n\n"
+                        "Rubric Criteria:\n{rubric}\n\n"
+                        "Historical Criterion Levels:\n{levels}\n"
+                        "Historical Competency Score: {existing_score}\n\n"
+                        "Guidelines:\n"
+                        "- Update only the rubric criteria listed above.\n"
+                        "- Preserve or raise previously achieved levels and scores.\n"
+                        "- Explain any adjustments in rubric updates.\n\n"
                         "Recent Conversation Window:\n{history}\n\n"
                         "Latest Question: {question}\n"
                         "Candidate Answer: {answer}\n\n"
@@ -68,14 +77,22 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
     ) -> EvaluationPlan:  # Run evaluator against the latest exchange
         summary = state.context.evaluator.summary.strip()
         history = _recent_history(state.messages, self._window)
+        competency = _resolve_competency(state, question)
+        criteria = state.context.competency_criteria.get(competency, [])
+        baseline_levels = state.context.competency_criterion_levels.get(competency, {})
+        prior_score = state.context.evaluator.scores.get(competency)
         task = self._prompt.format(
             instructions=EVALUATOR_GUIDANCE,
             stage=stage,
+            active_competency=competency or "(not set)",
             job_title=state.context.job_title,
             job_description=_clamp(state.context.job_description),
             resume_summary=_clamp(state.context.resume_summary),
             competencies=_format_competencies(state.context.competency_pillars),
             summary=summary or "(no summary yet)",
+            rubric=_format_rubric(criteria),
+            levels=_format_levels(criteria, baseline_levels, prior_score),
+            existing_score=_format_score(prior_score),
             history=_format_history(history),
             question=question.content.strip(),
             answer=answer.content.strip(),
@@ -83,19 +100,60 @@ class EvaluatorAgent:  # Agent evaluating candidate answers against rubric conte
         plan = call(task, self._schema, cfg=self._route)
         anchors = [_clean_line(item) for item in plan.anchors if _clean_line(item)]
         updates = [_clean_line(item) for item in plan.rubric_updates if _clean_line(item)]
-        scores = [_normalize_score(score) for score in plan.scores]
+        scores: List[CompetencyScore] = []
+        criteria_map = state.context.competency_criteria
+        prior_scores = state.context.evaluator.scores
+        level_map = state.context.competency_criterion_levels
+        for raw in plan.scores:
+            rubric = criteria_map.get(raw.competency, [])
+            previous = prior_scores.get(raw.competency)
+            baseline = level_map.get(raw.competency, {})
+            scores.append(_normalize_score(raw, rubric, previous, baseline))
         return plan.model_copy(update={"anchors": anchors, "rubric_updates": updates, "scores": scores})
 
 
-def _normalize_score(score: CompetencyScore) -> CompetencyScore:  # Clamp evaluator score payload
+def _normalize_score(
+    score: CompetencyScore,
+    rubric: Sequence[str],
+    existing: CompetencyScore | None,
+    baseline: Mapping[str, int],
+) -> CompetencyScore:  # Clamp evaluator score payload with rubric alignment
     value = max(0.0, min(5.0, score.score))
+    if existing:
+        value = max(existing.score, value)
     cleaned_notes = [_clean_line(note) for note in score.notes if _clean_line(note)]
     cleaned_updates = [_clean_line(note) for note in score.rubric_updates if _clean_line(note)]
-    normalized_levels = {
-        key: _clamp_level(amount)
-        for key, amount in score.criterion_levels.items()
-        if _clean_line(key)
-    }
+    lookup = _build_lookup(rubric)
+    if lookup:
+        baseline_levels: Dict[str, int] = {name: 0 for name in lookup.values()}
+        if existing:
+            for raw, amount in existing.criterion_levels.items():
+                canonical = lookup.get(_clean_line(raw).lower())
+                if canonical:
+                    baseline_levels[canonical] = max(baseline_levels[canonical], _clamp_level(amount))
+        for raw, amount in baseline.items():
+            canonical = lookup.get(_clean_line(raw).lower())
+            if canonical:
+                baseline_levels[canonical] = max(baseline_levels[canonical], _clamp_level(amount))
+        incoming: Dict[str, int] = {}
+        for raw, amount in score.criterion_levels.items():
+            canonical = lookup.get(_clean_line(raw).lower())
+            if canonical:
+                incoming[canonical] = _clamp_level(amount)
+        normalized_levels: Dict[str, int] = {}
+        for label in rubric:
+            canonical = lookup.get(_clean_line(label).lower())
+            if not canonical:
+                continue
+            prior = baseline_levels.get(canonical, 0)
+            candidate = incoming.get(canonical, prior)
+            normalized_levels[canonical] = max(prior, candidate)
+    else:
+        normalized_levels = {
+            key: _clamp_level(amount)
+            for key, amount in score.criterion_levels.items()
+            if _clean_line(key)
+        }
     return score.model_copy(
         update={
             "score": value,
@@ -104,6 +162,14 @@ def _normalize_score(score: CompetencyScore) -> CompetencyScore:  # Clamp evalua
             "criterion_levels": normalized_levels,
         }
     )
+
+
+def _resolve_competency(state: FlowState, question: ChatTurn) -> str:  # Determine active competency for the evaluator
+    if question.competency:
+        return question.competency
+    if state.context.competency:
+        return state.context.competency
+    return ""
 
 
 def _recent_history(messages: Sequence[ChatTurn], window: int) -> List[ChatTurn]:  # Select last N turns
@@ -128,6 +194,46 @@ def _format_competencies(items: Iterable[str]) -> str:  # Render competency pill
     return "\n".join(f"- {value}" for value in values)
 
 
+def _format_rubric(criteria: Sequence[str]) -> str:  # Format rubric criteria for evaluator context
+    items = [_clean_line(item) for item in criteria if _clean_line(item)]
+    if not items:
+        return "(no rubric criteria available)"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _format_levels(
+    criteria: Sequence[str],
+    baseline: Mapping[str, int],
+    existing: CompetencyScore | None,
+) -> str:  # Format historical criterion levels for prompt context
+    lookup = _build_lookup(criteria)
+    if not lookup:
+        return "(no rubric criteria available)"
+    levels: Dict[str, int] = {name: 0 for name in lookup.values()}
+    if existing:
+        for raw, amount in existing.criterion_levels.items():
+            canonical = lookup.get(_clean_line(raw).lower())
+            if canonical:
+                levels[canonical] = max(levels[canonical], _clamp_level(amount))
+    for raw, amount in baseline.items():
+        canonical = lookup.get(_clean_line(raw).lower())
+        if canonical:
+            levels[canonical] = max(levels[canonical], _clamp_level(amount))
+    lines: List[str] = []
+    for item in criteria:
+        canonical = lookup.get(_clean_line(item).lower())
+        if not canonical:
+            continue
+        lines.append(f"- {_clean_line(canonical)}: level {levels.get(canonical, 0)}")
+    return "\n".join(lines) if lines else "(no rubric criteria available)"
+
+
+def _format_score(existing: CompetencyScore | None) -> str:  # Describe prior competency score
+    if not existing:
+        return "No prior competency score recorded."
+    return f"{existing.score:.2f} / 5.00"
+
+
 def _clamp(text: str, limit: int = 900) -> str:  # Clamp long context strings for the evaluator prompt
     compact = " ".join(text.split())
     if len(compact) <= limit:
@@ -137,6 +243,15 @@ def _clamp(text: str, limit: int = 900) -> str:  # Clamp long context strings fo
 
 def _clean_line(text: str) -> str:  # Normalize whitespace on evaluator outputs
     return " ".join(text.split())
+
+
+def _build_lookup(criteria: Sequence[str]) -> Dict[str, str]:  # Map normalized criterion names to canonical labels
+    lookup: Dict[str, str] = {}
+    for item in criteria:
+        cleaned = _clean_line(item)
+        if cleaned:
+            lookup[cleaned.lower()] = item
+    return lookup
 
 
 def _clamp_level(raw: int | float) -> int:  # Clamp criterion level into rubric bounds

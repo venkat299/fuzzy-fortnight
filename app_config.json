@@ -2,7 +2,7 @@
   "llm_routes": {
     "gpt-oss-20b-local": {
       "name": "gpt-oss-20b-local",
-      "base_url": "http://192.168.0.175:1234",
+      "base_url": "http://10.209.160.153:1234",
       "endpoint": "/v1/chat/completions",
       "model": "openai/gpt-oss-20b",
       "timeout_s": 60.0,
@@ -12,7 +12,7 @@
     },
     "qwen3-4b-local": {
       "name": "qwen3-4b-local",
-      "base_url": "http://192.168.0.175:1234",
+      "base_url": "http://10.209.160.153:1234",
       "endpoint": "/v1/chat/completions",
       "model": "qwen/qwen3-4b-2507",
       "timeout_s": 60.0,
@@ -22,7 +22,7 @@
     },
     "qwen2-human": {
       "name": "qwen2-human",
-      "base_url": "http://192.168.0.175:1234",
+      "base_url": "http://10.209.160.153:1234",
       "endpoint": "/v1/chat/completions",
       "model": "dpo-qwen2-1.5b-instruct-human-like",
       "timeout_s": 60.0,
@@ -32,7 +32,7 @@
     },
     "qwen2-human-raw": {
       "name": "qwen2-human-raw",
-      "base_url": "http://192.168.0.175:1234",
+      "base_url": "http://10.209.160.153:1234",
       "endpoint": "/v1/chat/completions",
       "model": "dpo-qwen2-1.5b-instruct-human-like",
       "timeout_s": 60.0,

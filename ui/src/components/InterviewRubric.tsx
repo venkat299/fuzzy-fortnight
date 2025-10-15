@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowLeft, CheckCircle2, LayoutDashboard } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Download, LayoutDashboard } from 'lucide-react';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -41,6 +41,7 @@ interface InterviewRubricProps {
 }
 
 export function InterviewRubric({ data, onBack, onBackToDashboard }: InterviewRubricProps) {
+  const pdfHref = `/api/interviews/${data.interviewId}/rubric.pdf`;
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
       <div className="max-w-6xl mx-auto space-y-8">
@@ -58,6 +59,12 @@ export function InterviewRubric({ data, onBack, onBackToDashboard }: InterviewRu
             >
               <LayoutDashboard className="h-4 w-4" />
               Back to dashboard
+            </Button>
+            <Button asChild className="flex items-center gap-2">
+              <a href={pdfHref} download>
+                <Download className="h-4 w-4" />
+                Download rubric PDF
+              </a>
             </Button>
           </div>
 
